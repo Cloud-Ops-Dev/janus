@@ -7,11 +7,19 @@ otherwise leak into outputs or logs.
 """
 
 from janus.security.credential_broker import CredentialBroker, CredentialError
+from janus.security.output_sanitizer import (
+    NullSanitizer,
+    OutputSanitizer,
+    ResultSanitizer,
+)
 from janus.security.secret_redactor import REDACTION_PLACEHOLDER, SecretRedactor
 
 __all__ = [
     "REDACTION_PLACEHOLDER",
     "CredentialBroker",
     "CredentialError",
+    "NullSanitizer",
+    "OutputSanitizer",
+    "ResultSanitizer",
     "SecretRedactor",
 ]

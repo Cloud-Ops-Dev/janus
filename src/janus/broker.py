@@ -21,7 +21,6 @@ from janus.audit.types import AuditEntry, AuditSink
 from janus.downstream.client_manager import (
     DownstreamClientManager,
     DownstreamError,
-    DownstreamResult,
 )
 from janus.policy.types import Decision, PolicyContext, PolicyEngine
 from janus.registry.registry import (
@@ -31,8 +30,8 @@ from janus.registry.registry import (
     Registry,
     RiskTier,
 )
+from janus.security.output_sanitizer import NullSanitizer, ResultSanitizer
 
-Sanitizer = Callable[[DownstreamResult], DownstreamResult]
 Clock = Callable[[], datetime]
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -50,7 +49,7 @@ class Broker:
         policy: PolicyEngine,
         audit: AuditSink,
         *,
-        sanitizer: Sanitizer | None = None,
+        sanitizer: ResultSanitizer | None = None,
         session_id: str = "default",
         profile: str = "default_assistant",
         attended: bool = True,
@@ -61,7 +60,7 @@ class Broker:
         self._manager = manager
         self._policy = policy
         self._audit = audit
-        self._sanitizer: Sanitizer = sanitizer or (lambda r: r)
+        self._sanitizer: ResultSanitizer = sanitizer or NullSanitizer()
         self._session_id = session_id
         self._profile = profile
         self._attended = attended
@@ -272,7 +271,8 @@ class Broker:
             )
             return {"status": "error", "capability_id": cap.id, "error": str(exc)}
 
-        result = self._sanitizer(result)
+        server = self._registry.servers[cap.server_id]
+        result = self._sanitizer.sanitize(result, trust_level=server.trust_level)
         latency = self._elapsed_ms(started)
         status = "error" if result.is_error else "ok"
         self._audit_record(cap, env, "allow", status, reason, arg_keys, latency)
