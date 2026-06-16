@@ -15,6 +15,7 @@ the registry. Secrets are never logged and never returned to callers.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ from mcp.client.session_group import (
 from mcp.types import CallToolResult, Implementation, TextContent, Tool
 
 from janus.registry.registry import AuthType, Lifecycle, Server, Transport
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -154,14 +157,22 @@ class DownstreamClientManager:
         *,
         call_timeout: float = 30.0,
         max_retries: int = 2,
+        connect_retries: int = 4,
+        connect_retry_delay: float = 3.0,
     ) -> None:
         self._servers = servers
         self._resolver: ConnectionResolver = resolver or EnvConnectionResolver()
         self._call_timeout = call_timeout
         self._max_retries = max_retries
+        # Startup connect resilience (infra-xwx): retry a downstream that is not
+        # yet reachable (e.g. a boot-time DNS race) before giving up on it.
+        self._connect_retries = connect_retries
+        self._connect_retry_delay = connect_retry_delay
         self._sessions: dict[str, ClientSession] = {}
         self._stack: AsyncExitStack | None = None
         self._group: ClientSessionGroup | None = None
+        # Server ids that failed to connect on the last connect_all (id -> error).
+        self._connect_failures: dict[str, str] = {}
         # Set transiently around each connect so the namespacing hook can tag
         # components with our registry server id (connects are sequential).
         self._connecting_server_id: str | None = None
@@ -188,6 +199,11 @@ class DownstreamClientManager:
     @property
     def connected_servers(self) -> list[str]:
         return list(self._sessions)
+
+    @property
+    def connect_failures(self) -> dict[str, str]:
+        """Server ids that failed to connect on the last connect_all (id -> error)."""
+        return dict(self._connect_failures)
 
     # -- connecting --------------------------------------------------------- #
     def _build_params(
@@ -238,14 +254,70 @@ class DownstreamClientManager:
             self._connecting_server_id = None
         self._sessions[server_id] = session
 
+    async def _connect_server_with_retry(self, server_id: str) -> None:
+        """Connect one server, retrying transient failures with a fixed backoff.
+
+        A freshly-booted host may not have DNS / dependencies ready when the
+        gateway starts (the infra-xwx boot race: a stdio wrapper's ``op`` call
+        fails because the resolver is not up yet). Retrying lets that clear
+        instead of failing the connect outright.
+        """
+        attempts = self._connect_retries + 1
+        last_exc: BaseException = DownstreamError(
+            f"server '{server_id}': connect not attempted"
+        )
+        for attempt in range(1, attempts + 1):
+            try:
+                await self.connect_server(server_id)
+                return
+            except Exception as exc:  # noqa: BLE001 — retry any connect failure
+                last_exc = exc
+                if attempt < attempts:
+                    logger.info(
+                        "downstream '%s' connect attempt %d/%d failed (%s); "
+                        "retrying in %.1fs",
+                        server_id,
+                        attempt,
+                        attempts,
+                        exc,
+                        self._connect_retry_delay,
+                    )
+                    await asyncio.sleep(self._connect_retry_delay)
+        raise last_exc
+
     async def connect_all(self, *, only_always_on: bool = True) -> list[str]:
-        """Connect declared servers (always-on by default). Returns connected ids."""
+        """Connect declared servers (always-on by default), tolerantly.
+
+        Each downstream is retried with backoff (to ride out a transient boot
+        DNS / dependency race) and, if it still fails, logged and skipped rather
+        than aborting startup. This is the Logout-Test fix for infra-xwx: one
+        dead or not-yet-ready downstream must not take Janus down. Returns the
+        ids that connected; failures are recorded in ``connect_failures``.
+        """
         connected: list[str] = []
+        self._connect_failures = {}
         for server_id, server in self._servers.items():
             if only_always_on and server.lifecycle is not Lifecycle.ALWAYS_ON:
                 continue
-            await self.connect_server(server_id)
-            connected.append(server_id)
+            try:
+                await self._connect_server_with_retry(server_id)
+                connected.append(server_id)
+            except Exception as exc:  # noqa: BLE001 — tolerate any single downstream
+                self._connect_failures[server_id] = str(exc)
+                logger.warning(
+                    "downstream '%s' failed to connect after %d attempt(s); "
+                    "skipping so the gateway can still serve: %s",
+                    server_id,
+                    self._connect_retries + 1,
+                    exc,
+                )
+        if self._connect_failures:
+            logger.warning(
+                "connect_all: %d server(s) connected, %d failed (%s)",
+                len(connected),
+                len(self._connect_failures),
+                ", ".join(sorted(self._connect_failures)),
+            )
         return connected
 
     # -- calling ------------------------------------------------------------ #

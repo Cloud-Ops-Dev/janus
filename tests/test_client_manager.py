@@ -88,6 +88,68 @@ def test_call_unconnected_server_raises() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Tolerant / resilient startup connect (infra-xwx)
+# --------------------------------------------------------------------------- #
+def test_connect_all_tolerates_failed_downstream() -> None:
+    """One dead downstream must not take the gateway down (Logout-Test fix)."""
+
+    async def body() -> None:
+        bad = Server(
+            id="bad",
+            display_name="Bad",
+            transport=Transport.STDIO,
+            command="/nonexistent/janus-no-such-binary",
+            args=[],
+            default_env_scope=[EnvScope.DEV],
+        )
+        mgr = DownstreamClientManager(
+            {"good": _stdio_server("good"), "bad": bad},
+            connect_retries=1,
+            connect_retry_delay=0.0,
+        )
+        async with mgr:
+            connected = await mgr.connect_all()
+            assert connected == ["good"]
+            assert mgr.connected_servers == ["good"]
+            assert "bad" in mgr.connect_failures
+            # The healthy server is still fully usable despite 'bad' failing.
+            result = await mgr.call("good", "echo", {"text": "hi"})
+            assert "hi" in result.text
+
+    asyncio.run(body())
+
+
+def test_connect_all_retries_transient_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient connect failure (e.g. boot DNS race) is retried, not fatal."""
+
+    async def body() -> None:
+        mgr = DownstreamClientManager(
+            {"good": _stdio_server("good")},
+            connect_retries=3,
+            connect_retry_delay=0.0,
+        )
+        real_connect = mgr.connect_server
+        calls = {"n": 0}
+
+        async def flaky(server_id: str) -> None:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("transient boot race")
+            await real_connect(server_id)
+
+        monkeypatch.setattr(mgr, "connect_server", flaky)
+        async with mgr:
+            connected = await mgr.connect_all()
+            assert connected == ["good"]
+            assert calls["n"] == 3
+            assert mgr.connect_failures == {}
+
+    asyncio.run(body())
+
+
+# --------------------------------------------------------------------------- #
 # Connection resolver (unit)
 # --------------------------------------------------------------------------- #
 def test_env_resolver_reads_named_vars() -> None:
