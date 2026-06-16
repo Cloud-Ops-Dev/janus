@@ -16,6 +16,7 @@ which cannot see the closure-local ``authenticate``/``Identity`` if annotations
 are stringized. Runtime ``X | None`` / ``dict[...]`` types are fine on py311+.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -90,9 +91,13 @@ class ExplainBody(BaseModel):
 
 
 def create_rest_app(
-    deps: BrokerDeps, tokens: dict[str, HostIdentity], *, title: str = "Janus"
+    deps: BrokerDeps,
+    tokens: dict[str, HostIdentity],
+    *,
+    title: str = "Janus",
+    lifespan: Callable[[FastAPI], Any] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title=title, version="0.1.0")
+    app = FastAPI(title=title, version="0.1.0", lifespan=lifespan)
 
     def authenticate(
         authorization: Annotated[str | None, Header()] = None,

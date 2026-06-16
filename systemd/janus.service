@@ -1,0 +1,34 @@
+# Janus MCP gateway — systemd --user unit (REST + networked surface).
+#
+# Self-sufficiency / Logout Test (constitution §12): no interactive-shell
+# dependency. Secrets come from EnvironmentFile only; ExecStartPre (--check)
+# fails loudly if a required endpoint or secret is missing, so the unit never
+# starts in a silently-degraded state.
+#
+# Install (operator, break-glass):
+#   cp systemd/janus.service ~/.config/systemd/user/
+#   # create ~/.config/systemd/user/op-creds.env  (mode 0600): OP_SERVICE_ACCOUNT_TOKEN=...
+#   # create ~/.config/systemd/user/janus.env     (mode 0600): JANUS_* endpoints + JANUS_TOKENS
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now janus.service
+#   loginctl enable-linger "$USER"   # survive logout (Logout Test)
+
+[Unit]
+Description=Janus MCP gateway / capability broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/IDE/projects/janus
+# '-' tolerates a missing file so the unit can start; --check below is what
+# actually enforces that required secrets are present (fail-loud, not silent).
+EnvironmentFile=-%h/.config/systemd/user/op-creds.env
+EnvironmentFile=-%h/.config/systemd/user/janus.env
+ExecStartPre=%h/IDE/projects/janus/.venv/bin/python -m janus --check
+ExecStart=%h/IDE/projects/janus/.venv/bin/python -m janus --serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
