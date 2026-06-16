@@ -1,0 +1,43 @@
+# --- Secrets: NEVER commit (this repo is intended to be public) ---
+.env
+.env.*
+*.env
+op-creds*
+*-creds.env
+*.pem
+*.key
+*_token
+*secret*
+.secrets/
+config/*.local.*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Runtime state / data (SQLite, logs) — keep out of git and any sync tree ---
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+
+# --- Editor / OS ---
+.DS_Store
+*.swp
+.idea/
+.vscode/
