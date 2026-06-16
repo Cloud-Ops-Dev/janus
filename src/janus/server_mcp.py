@@ -1,0 +1,106 @@
+"""FastMCP server — exposes Janus's 7 broker tools as one small MCP surface.
+
+This is the entire agent-facing tool surface (design §3). Everything else (Open
+Brain, Paperclip, Beads, ...) stays an implementation detail behind the broker.
+Tool names use underscores (``capability_search``) for cross-client portability.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastmcp import FastMCP
+
+from janus.broker import Broker
+from janus.registry.registry import EnvScope, RiskTier
+
+
+def _parse_env(env: str | None) -> EnvScope | None:
+    if env is None:
+        return None
+    return EnvScope(env)
+
+
+def _parse_risk(risk: str | None) -> RiskTier | None:
+    if risk is None:
+        return None
+    return RiskTier(risk)
+
+
+def create_mcp_server(broker: Broker, *, name: str = "janus") -> FastMCP:
+    """Build the Janus FastMCP server bound to a broker instance."""
+    mcp: FastMCP = FastMCP(name)
+
+    @mcp.tool
+    async def capability_search(
+        query: str,
+        env: str | None = None,
+        max_results: int = 10,
+        risk_max: str | None = None,
+    ) -> dict[str, Any]:
+        """Search for relevant capabilities. Returns a ranked short list with
+        summaries and risk tiers — NOT full schemas. Call capability_describe
+        for a schema, then capability_call to invoke."""
+        try:
+            return broker.capability_search(
+                query, _parse_env(env), max_results, _parse_risk(risk_max)
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool
+    async def capability_describe(
+        capability_id: str, env: str | None = None
+    ) -> dict[str, Any]:
+        """Describe one capability: its input schema (fetched on demand), risk
+        tier, and the policy decision for the current session/environment."""
+        try:
+            return await broker.capability_describe(capability_id, _parse_env(env))
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool
+    async def capability_call(
+        capability_id: str,
+        arguments: dict[str, Any],
+        reason: str,
+        env: str | None = None,
+    ) -> dict[str, Any]:
+        """Invoke a capability. The call is policy-checked and audited. `reason`
+        is your stated intent (recorded). Write/prod-like calls may be denied or
+        require confirmation — see policy_explain."""
+        try:
+            return await broker.capability_call(
+                capability_id, arguments, reason, _parse_env(env)
+            )
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
+
+    @mcp.tool
+    async def server_list() -> dict[str, Any]:
+        """List downstream servers: transport, trust, connection status, and
+        capability counts."""
+        return broker.server_list()
+
+    @mcp.tool
+    async def server_health(server_id: str | None = None) -> dict[str, Any]:
+        """Liveness and tool counts for one or all downstream servers."""
+        return await broker.server_health(server_id)
+
+    @mcp.tool
+    async def policy_explain(
+        capability_id: str, env: str | None = None
+    ) -> dict[str, Any]:
+        """Explain why a capability is allowed, denied, or needs confirmation in
+        the given environment for the current session profile."""
+        try:
+            return broker.policy_explain(capability_id, _parse_env(env))
+        except ValueError as exc:
+            return {"error": str(exc)}
+
+    @mcp.tool
+    async def audit_recent(limit: int = 20) -> dict[str, Any]:
+        """Recent brokered invocations (allow/confirm/deny) for this session."""
+        return broker.audit_recent(limit)
+
+    return mcp
