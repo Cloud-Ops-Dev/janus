@@ -25,12 +25,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from dataclasses import asdict
 from typing import Any
 
 from janus.admin.service import AdminError, AdminService
-from janus.discovery import DiscoveryCrawler, DiscoveryReport
+from janus.discovery import DriftMonitor, DriftResult, build_alerter
 from janus.gateway import REGISTRY_DB_NAME, Gateway, GatewayConfig
 from janus.registry.registry import load_registry
 from janus.registry.schema_store import CapabilityState, SchemaStore
@@ -77,14 +78,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-async def _discover(config: GatewayConfig) -> DiscoveryReport:
+async def _discover(config: GatewayConfig) -> DriftResult:
     gateway = Gateway.build(config)
     await gateway.connect()
     try:
-        crawler = DiscoveryCrawler(
-            gateway.deps.registry, gateway.manager, gateway.store
+        monitor = DriftMonitor(
+            gateway.deps.registry,
+            gateway.manager,
+            gateway.store,
+            alerter=build_alerter(os.environ),
         )
-        return await crawler.crawl()
+        return await monitor.scan()
     finally:
         await gateway.aclose()
 
@@ -106,8 +110,13 @@ def main(argv: list[str]) -> int:
     config = GatewayConfig.from_env()
 
     if ns.cmd == "discover":
-        report = asyncio.run(_discover(config))
-        _emit({"command": "discover", **report.summary()})
+        result = asyncio.run(_discover(config))
+        _emit({
+            "command": "discover",
+            **result.report.summary(),
+            "quarantined": result.quarantined,
+            "alerts_sent": result.alerts_sent,
+        })
         return 0
 
     registry = load_registry(config.config_dir)
