@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+# owner: Clayton
+# last_reviewed: 2026-06-16
+# source_of_truth_for: Janus CLI — thin client over the REST API (search/describe/call/servers/health/explain/audit)
+# supersedes: null
+#
+# bin/janus — command-line client for the Janus gateway REST API. The execution
+# interface for SSH-driven / Hermes-Desktop use (constitution §2; design §8).
+# Reads JANUS_URL (default http://127.0.0.1:8088) and JANUS_TOKEN from the
+# environment — never hard-coded (public repo). Stdlib only (no extra deps).
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+DEFAULT_URL = "http://127.0.0.1:8088"
+
+
+def _request(method: str, path: str, *, body: dict | None = None, query: str = "") -> dict:
+    base = os.environ.get("JANUS_URL", DEFAULT_URL).rstrip("/")
+    token = os.environ.get("JANUS_TOKEN")
+    if not token:
+        sys.exit("error: JANUS_TOKEN is not set (per-host bearer token required)")
+    url = f"{base}{path}{query}"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 — fixed scheme
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        sys.exit(f"error: HTTP {exc.code} — {detail}")
+    except urllib.error.URLError as exc:
+        sys.exit(f"error: cannot reach Janus at {base} — {exc.reason}")
+
+
+def _emit(payload: dict) -> None:
+    json.dump(payload, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="janus", description="Janus gateway CLI")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("search", help="search capabilities")
+    s.add_argument("query")
+    s.add_argument("--env")
+    s.add_argument("--max-results", type=int, default=10)
+    s.add_argument("--risk-max")
+
+    d = sub.add_parser("describe", help="describe one capability")
+    d.add_argument("capability_id")
+    d.add_argument("--env")
+
+    c = sub.add_parser("call", help="invoke a capability")
+    c.add_argument("capability_id")
+    c.add_argument("--reason", required=True)
+    c.add_argument("--arg", action="append", default=[], metavar="KEY=VALUE")
+    c.add_argument("--env")
+    c.add_argument("--confirm", action="store_true")
+
+    e = sub.add_parser("explain", help="explain a policy decision")
+    e.add_argument("capability_id")
+    e.add_argument("--env")
+
+    sub.add_parser("servers", help="list downstream servers")
+
+    h = sub.add_parser("health", help="server health")
+    h.add_argument("--server")
+
+    a = sub.add_parser("audit", help="recent audited calls")
+    a.add_argument("--limit", type=int, default=20)
+
+    return p.parse_args(argv)
+
+
+def _kv(pairs: list[str]) -> dict:
+    out: dict = {}
+    for pair in pairs:
+        if "=" not in pair:
+            sys.exit(f"error: --arg must be KEY=VALUE, got '{pair}'")
+        key, value = pair.split("=", 1)
+        try:
+            out[key] = json.loads(value)  # allow typed JSON values
+        except json.JSONDecodeError:
+            out[key] = value  # fall back to string
+    return out
+
+
+def main(argv: list[str]) -> int:
+    ns = _parse_args(argv)
+    if ns.cmd == "search":
+        body = {"query": ns.query, "env": ns.env,
+                "max_results": ns.max_results, "risk_max": ns.risk_max}
+        _emit(_request("POST", "/v1/capability/search", body=body))
+    elif ns.cmd == "describe":
+        body = {"capability_id": ns.capability_id, "env": ns.env}
+        _emit(_request("POST", "/v1/capability/describe", body=body))
+    elif ns.cmd == "call":
+        body = {"capability_id": ns.capability_id, "reason": ns.reason,
+                "arguments": _kv(ns.arg), "env": ns.env, "confirm": ns.confirm}
+        _emit(_request("POST", "/v1/capability/call", body=body))
+    elif ns.cmd == "explain":
+        body = {"capability_id": ns.capability_id, "env": ns.env}
+        _emit(_request("POST", "/v1/policy/explain", body=body))
+    elif ns.cmd == "servers":
+        _emit(_request("GET", "/v1/server/list"))
+    elif ns.cmd == "health":
+        query = f"?server_id={ns.server}" if ns.server else ""
+        _emit(_request("GET", "/v1/server/health", query=query))
+    elif ns.cmd == "audit":
+        _emit(_request("GET", "/v1/audit/recent", query=f"?limit={ns.limit}"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

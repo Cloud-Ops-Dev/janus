@@ -205,8 +205,15 @@ class Broker:
         arguments: dict[str, Any] | None,
         reason: str,
         env: EnvScope | None = None,
+        *,
+        confirmed: bool = False,
     ) -> dict[str, Any]:
-        """Policy-checked, audited invocation of one capability."""
+        """Policy-checked, audited invocation of one capability.
+
+        ``confirmed=True`` (set by the REST/CLI path after a human approves)
+        lets a CONFIRM-tier call execute. It is ignored for unattended sessions,
+        which always hard-deny confirm-tier actions.
+        """
         arguments = arguments or {}
         arg_keys = sorted(arguments)
         cap = self._registry.capabilities.get(capability_id)
@@ -233,32 +240,35 @@ class Broker:
                 "reason": decision.reason,
             }
 
-        if decision.decision is Decision.CONFIRM:
+        confirm_tier = decision.decision is Decision.CONFIRM
+        if confirm_tier:
             if not self._attended:
                 # Locked operator decision (2026-06-16): unattended confirm-tier
                 # is hard-denied + audited (no async approval queue in Phase 1).
                 hard = f"unattended session: confirm-tier hard-denied ({decision.reason})"
                 self._audit_record(cap, env, "deny", "blocked", hard, arg_keys)
                 return {"status": "denied", "capability_id": cap.id, "reason": hard}
-            # MCP cannot prompt interactively; surface a confirmation requirement
-            # for the REST/CLI path (infra-22q.7) to satisfy.
-            self._audit_record(
-                cap, env, "confirm", "needs_confirmation", decision.reason, arg_keys
-            )
-            return {
-                "status": "needs_confirmation",
-                "capability_id": cap.id,
-                "reason": decision.reason,
-                "preview": {
-                    "server_id": cap.server_id,
-                    "downstream_tool": cap.downstream_tool_name,
-                    "risk": str(cap.risk),
-                    "env": str(env),
-                    "arg_keys": arg_keys,
-                },
-            }
+            if not confirmed:
+                # Surface a confirmation requirement for the caller (REST/CLI, or
+                # an MCP client that re-calls with confirm) to satisfy.
+                self._audit_record(
+                    cap, env, "confirm", "needs_confirmation", decision.reason, arg_keys
+                )
+                return {
+                    "status": "needs_confirmation",
+                    "capability_id": cap.id,
+                    "reason": decision.reason,
+                    "preview": {
+                        "server_id": cap.server_id,
+                        "downstream_tool": cap.downstream_tool_name,
+                        "risk": str(cap.risk),
+                        "env": str(env),
+                        "arg_keys": arg_keys,
+                    },
+                }
 
-        # ALLOW — execute downstream.
+        # ALLOW (or confirmed CONFIRM) — execute downstream.
+        audit_decision = "confirm" if confirm_tier else "allow"
         started = self._clock()
         try:
             result = await self._manager.call(
@@ -267,7 +277,7 @@ class Broker:
         except DownstreamError as exc:
             latency = self._elapsed_ms(started)
             self._audit_record(
-                cap, env, "allow", "error", str(exc), arg_keys, latency
+                cap, env, audit_decision, "error", str(exc), arg_keys, latency
             )
             return {"status": "error", "capability_id": cap.id, "error": str(exc)}
 
@@ -275,7 +285,7 @@ class Broker:
         result = self._sanitizer.sanitize(result, trust_level=server.trust_level)
         latency = self._elapsed_ms(started)
         status = "error" if result.is_error else "ok"
-        self._audit_record(cap, env, "allow", status, reason, arg_keys, latency)
+        self._audit_record(cap, env, audit_decision, status, reason, arg_keys, latency)
         return {
             "status": status,
             "capability_id": cap.id,

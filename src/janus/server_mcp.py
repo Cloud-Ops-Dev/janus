@@ -65,13 +65,14 @@ def create_mcp_server(broker: Broker, *, name: str = "janus") -> FastMCP:
         arguments: dict[str, Any],
         reason: str,
         env: str | None = None,
+        confirm: bool = False,
     ) -> dict[str, Any]:
         """Invoke a capability. The call is policy-checked and audited. `reason`
         is your stated intent (recorded). Write/prod-like calls may be denied or
-        require confirmation — see policy_explain."""
+        return needs_confirmation — re-call with confirm=true to proceed."""
         try:
             return await broker.capability_call(
-                capability_id, arguments, reason, _parse_env(env)
+                capability_id, arguments, reason, _parse_env(env), confirmed=confirm
             )
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
