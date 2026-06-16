@@ -1,0 +1,58 @@
+# owner: Clayton
+# last_reviewed: 2026-06-16
+# source_of_truth_for: Janus downstream MCP server registry — transport, trust, risk ceiling, env scope (Phase-1 seed)
+# supersedes: null
+#
+# Janus downstream server registry — Phase 1 seed.
+#
+# PUBLIC-REPO SAFETY: this file is committed to a public repo. It MUST NOT
+# contain secrets, tokens, op:// references, or internal URLs/IPs/hostnames.
+# Connection endpoints and credentials are supplied at runtime via the named
+# environment variables (`endpoint_env`, `auth.secret_env`), resolved by the
+# credential broker. Real per-host values live in the systemd EnvironmentFile
+# or a gitignored config/*.local.yaml overlay.
+#
+# Phase-1 scope is low-risk, read-mostly, first-party servers (design §9).
+# Write/prod/financial servers are onboarded in Phase 3 behind policy.
+
+servers:
+  open_brain:
+    display_name: Open Brain
+    transport: streamable_http
+    endpoint_env: JANUS_OPEN_BRAIN_URL
+    auth:
+      type: bearer
+      secret_env: JANUS_OPEN_BRAIN_TOKEN
+    lifecycle: always_on
+    trust_level: first_party
+    # ceiling allows the Phase-3 write capabilities (capture/update); Phase-1
+    # only declares read_only capabilities, kept well under the ceiling.
+    risk_ceiling: local_write
+    default_env_scope: [dev, prod_safe]
+    tags: [memory, search, notes, semantic]
+
+  beads_readonly:
+    display_name: Beads (read-only)
+    transport: streamable_http
+    endpoint_env: JANUS_BEADS_RO_URL
+    auth:
+      type: bearer
+      secret_env: JANUS_BEADS_RO_TOKEN
+    lifecycle: always_on
+    trust_level: first_party
+    risk_ceiling: read_only
+    default_env_scope: [dev, test, prod_safe]
+    tags: [issues, tasks, tracker]
+
+  paperclip:
+    display_name: Paperclip
+    transport: streamable_http
+    endpoint_env: JANUS_PAPERCLIP_URL
+    auth:
+      type: bearer
+      secret_env: JANUS_PAPERCLIP_TOKEN
+    lifecycle: always_on
+    trust_level: first_party
+    risk_ceiling: read_only
+    default_env_scope: [dev, prod_safe]
+    tags: [agents, projects, issues, board]

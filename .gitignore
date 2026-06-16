@@ -36,6 +36,9 @@ data/
 *.sqlite3
 *.log
 
+# --- Operator working scratch (repo-related WIP, not for commit) ---
+source_ref/
+
 # --- Editor / OS ---
 .DS_Store
 *.swp

@@ -1,0 +1,129 @@
+# owner: Clayton
+# last_reviewed: 2026-06-16
+# source_of_truth_for: Janus brokered-capability registry — one entry per approved downstream tool (Phase-1 seed)
+# supersedes: null
+#
+# Janus capability registry — Phase 1 seed (read-only, first-party).
+#
+# Each capability is ONE downstream tool that Janus may broker. The `summary` is
+# the ONLY model-visible description — it is human-reviewed. The untrusted raw
+# downstream description is never stored here; only its sha256 hash
+# (`raw_description_hash`), populated by the discovery crawler (Phase 2), is
+# tracked, so a poisoned third-party descriptor can never reach the model.
+#
+# `raw_description_hash` / `input_schema_hash` / `last_verified` are intentionally
+# unset in this seed — they are filled when Janus first connects and lists tools.
+
+capabilities:
+  # --- Open Brain (semantic memory) — read ---------------------------------- #
+  open_brain.search_thoughts:
+    server_id: open_brain
+    downstream_tool_name: search_thoughts
+    title: Search Open Brain thoughts
+    summary: Semantic search over captured thoughts by meaning.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [memory, semantic-search]
+
+  open_brain.list_thoughts:
+    server_id: open_brain
+    downstream_tool_name: list_thoughts
+    title: List Open Brain thoughts
+    summary: List recent or filtered captured thoughts.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [memory, list]
+
+  open_brain.thought_stats:
+    server_id: open_brain
+    downstream_tool_name: thought_stats
+    title: Open Brain statistics
+    summary: Aggregate counts and statistics over captured thoughts.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [memory, stats]
+
+  # --- Beads (issue tracker) — read ----------------------------------------- #
+  beads_readonly.list:
+    server_id: beads_readonly
+    downstream_tool_name: list_issues
+    title: List beads issues
+    summary: List issues, optionally filtered by status or priority.
+    risk: read_only
+    env_scope: [dev, test, prod_safe]
+    approved: true
+    tags: [issues, list]
+
+  beads_readonly.show:
+    server_id: beads_readonly
+    downstream_tool_name: show_issue
+    title: Show a beads issue
+    summary: Show one issue's full details, dependencies, and status.
+    risk: read_only
+    env_scope: [dev, test, prod_safe]
+    approved: true
+    tags: [issues, detail]
+
+  beads_readonly.ready:
+    server_id: beads_readonly
+    downstream_tool_name: list_ready
+    title: List ready beads
+    summary: List issues that are ready to work (no open blockers).
+    risk: read_only
+    env_scope: [dev, test, prod_safe]
+    approved: true
+    tags: [issues, ready]
+
+  beads_readonly.stats:
+    server_id: beads_readonly
+    downstream_tool_name: stats
+    title: Beads statistics
+    summary: Aggregate issue counts by status, type, and priority.
+    risk: read_only
+    env_scope: [dev, test, prod_safe]
+    approved: true
+    tags: [issues, stats]
+
+  # --- Paperclip (agent platform) — read ------------------------------------ #
+  paperclip.list_companies:
+    server_id: paperclip
+    downstream_tool_name: list_companies
+    title: List Paperclip companies
+    summary: List companies in the Paperclip workspace.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [companies, list]
+
+  paperclip.list_issues:
+    server_id: paperclip
+    downstream_tool_name: list_issues
+    title: List Paperclip issues
+    summary: List issues across projects, optionally filtered.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [issues, list]
+
+  paperclip.get_dashboard:
+    server_id: paperclip
+    downstream_tool_name: get_dashboard
+    title: Paperclip dashboard
+    summary: Fetch the board/dashboard overview for the workspace.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [board, dashboard]
+
+  paperclip.health_check:
+    server_id: paperclip
+    downstream_tool_name: health_check
+    title: Paperclip health check
+    summary: Liveness/health probe for the Paperclip backend.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [health]
