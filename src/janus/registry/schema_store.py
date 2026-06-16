@@ -18,10 +18,11 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection, Row, connect
 from types import TracebackType
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from janus.registry.registry import Capability, Registry, Server
 
@@ -40,6 +41,51 @@ def hash_schema(schema: Mapping[str, Any]) -> str:
         schema, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
     return hash_text(canonical)
+
+
+# --------------------------------------------------------------------------- #
+# Runtime lifecycle state (Phase 2)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class CapabilityState:
+    """The mutable runtime lifecycle state of one capability (design §5.1/§5.8).
+
+    The YAML registry owns *structure* (which capabilities exist, their risk /
+    summary / env scope) and *initial* approval seeding. This store owns the
+    mutable lifecycle: the approved/quarantined flags the broker enforces, the
+    reviewed **baseline** descriptor/schema hashes (locked at approval), and the
+    **observed** hashes from the most recent discovery crawl. Drift = an approved
+    capability whose observed hash diverges from its baseline.
+    """
+
+    capability_id: str
+    approved: bool
+    quarantined: bool
+    baseline_description_hash: str | None
+    baseline_schema_hash: str | None
+    observed_description_hash: str | None
+    observed_schema_hash: str | None
+    last_verified: str | None
+    present: bool
+    approved_at: str | None = None
+    quarantine_reason: str | None = None
+
+    @property
+    def callable(self) -> bool:
+        """Brokerable only when approved and not quarantined (mirrors Capability)."""
+        return self.approved and not self.quarantined
+
+
+@runtime_checkable
+class CapabilityStateProvider(Protocol):
+    """Read-only view of runtime lifecycle state, consumed by the broker.
+
+    Lets the broker honor live approval/quarantine decisions (Phase 2) without
+    depending on the SQLite store directly; Phase-1 code with no store wired
+    simply passes ``None`` and the broker falls back to the frozen registry.
+    """
+
+    def get_state(self, capability_id: str) -> CapabilityState | None: ...
 
 
 _SCHEMA_SQL = """
@@ -68,11 +114,28 @@ CREATE TABLE IF NOT EXISTS capabilities (
     raw_description_hash  TEXT,
     input_schema_hash     TEXT,
     last_verified         TEXT,
+    observed_description_hash TEXT,
+    observed_schema_hash      TEXT,
+    present               INTEGER NOT NULL DEFAULT 1,
+    approved_at           TEXT,
+    quarantine_reason     TEXT,
     updated_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_capabilities_server ON capabilities(server_id);
 """
+
+# Columns added after the initial Phase-1 schema. Applied idempotently on open so
+# a pre-existing operational cache (gitignored, rebuildable) gains them without a
+# manual drop. ``raw_description_hash`` / ``input_schema_hash`` are the reviewed
+# *baseline*; ``observed_*`` are the latest crawl values (see CapabilityState).
+_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("observed_description_hash", "TEXT"),
+    ("observed_schema_hash", "TEXT"),
+    ("present", "INTEGER NOT NULL DEFAULT 1"),
+    ("approved_at", "TEXT"),
+    ("quarantine_reason", "TEXT"),
+)
 
 _UPSERT_SERVER = """
 INSERT INTO servers (id, display_name, transport, trust_level, lifecycle, risk_ceiling, tags)
@@ -87,6 +150,13 @@ ON CONFLICT(id) DO UPDATE SET
     updated_at   = strftime('%Y-%m-%dT%H:%M:%fZ','now');
 """
 
+# Re-syncing from YAML must NOT clobber runtime lifecycle state: a quarantine or
+# approval established at runtime has to survive a service restart (otherwise a
+# poisoned, auto-quarantined tool would silently re-enable on reboot). So the
+# ON CONFLICT clause updates *structural* columns only; ``approved``,
+# ``quarantined``, the baseline/observed hashes, ``last_verified``, ``present``,
+# ``approved_at``, and ``quarantine_reason`` are seeded once on INSERT and then
+# owned exclusively by record_observation / set_baseline / approve / quarantine.
 _UPSERT_CAPABILITY = """
 INSERT INTO capabilities (
     id, server_id, downstream_tool_name, title, summary, risk, env_scope,
@@ -101,11 +171,6 @@ ON CONFLICT(id) DO UPDATE SET
     risk                  = excluded.risk,
     env_scope             = excluded.env_scope,
     requires_confirmation = excluded.requires_confirmation,
-    approved              = excluded.approved,
-    quarantined           = excluded.quarantined,
-    raw_description_hash  = excluded.raw_description_hash,
-    input_schema_hash     = excluded.input_schema_hash,
-    last_verified         = excluded.last_verified,
     updated_at            = strftime('%Y-%m-%dT%H:%M:%fZ','now');
 """
 
@@ -126,7 +191,21 @@ class SchemaStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA_SQL)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add any post-Phase-1 columns missing from a pre-existing cache."""
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(capabilities)")
+        }
+        for column, decl in _MIGRATIONS:
+            if column not in existing:
+                # column/decl are module-level literals, never user input.
+                self._conn.execute(
+                    f"ALTER TABLE capabilities ADD COLUMN {column} {decl}"  # noqa: S608
+                )
 
     # -- lifecycle ---------------------------------------------------------- #
     def close(self) -> None:
@@ -225,3 +304,80 @@ class SchemaStore:
         if cached_raw is not None and raw_description_hash != cached_raw:
             return True
         return cached_schema is not None and input_schema_hash != cached_schema
+
+    # -- lifecycle state (Phase 2) ----------------------------------------- #
+    @staticmethod
+    def _state_from_row(row: Row) -> CapabilityState:
+        return CapabilityState(
+            capability_id=row["id"],
+            approved=bool(row["approved"]),
+            quarantined=bool(row["quarantined"]),
+            baseline_description_hash=row["raw_description_hash"],
+            baseline_schema_hash=row["input_schema_hash"],
+            observed_description_hash=row["observed_description_hash"],
+            observed_schema_hash=row["observed_schema_hash"],
+            last_verified=row["last_verified"],
+            present=bool(row["present"]),
+            approved_at=row["approved_at"],
+            quarantine_reason=row["quarantine_reason"],
+        )
+
+    def get_state(self, capability_id: str) -> CapabilityState | None:
+        """Return the runtime lifecycle state, or ``None`` if not cached.
+
+        Satisfies :class:`CapabilityStateProvider`; the broker treats ``None``
+        as "fall back to the frozen registry".
+        """
+        row = self._conn.execute(
+            "SELECT * FROM capabilities WHERE id = ?", (capability_id,)
+        ).fetchone()
+        return None if row is None else self._state_from_row(row)
+
+    def list_states(self) -> list[CapabilityState]:
+        """Every cached capability's lifecycle state, ordered by id."""
+        rows = self._conn.execute("SELECT * FROM capabilities ORDER BY id").fetchall()
+        return [self._state_from_row(row) for row in rows]
+
+    def record_observation(
+        self,
+        capability_id: str,
+        *,
+        observed_description_hash: str | None,
+        observed_schema_hash: str | None,
+        last_verified: str,
+        present: bool = True,
+    ) -> None:
+        """Persist the latest crawl observation. Never touches approval/baseline."""
+        cur = self._conn.execute(
+            "UPDATE capabilities SET observed_description_hash = ?, "
+            "observed_schema_hash = ?, last_verified = ?, present = ?, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+            (
+                observed_description_hash,
+                observed_schema_hash,
+                last_verified,
+                int(present),
+                capability_id,
+            ),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(capability_id)
+        self._conn.commit()
+
+    def set_baseline(
+        self,
+        capability_id: str,
+        *,
+        raw_description_hash: str | None,
+        input_schema_hash: str | None,
+    ) -> None:
+        """Lock the reviewed/trusted baseline hashes (TOFU on first crawl, or
+        on human approval). Subsequent drift is measured against these."""
+        cur = self._conn.execute(
+            "UPDATE capabilities SET raw_description_hash = ?, input_schema_hash = ?, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+            (raw_description_hash, input_schema_hash, capability_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(capability_id)
+        self._conn.commit()

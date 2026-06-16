@@ -15,12 +15,20 @@ from janus.registry.registry import (
     TrustLevel,
     load_registry,
 )
-from janus.registry.schema_store import SchemaStore, hash_schema, hash_text
+from janus.registry.schema_store import (
+    CapabilityState,
+    CapabilityStateProvider,
+    SchemaStore,
+    hash_schema,
+    hash_text,
+)
 
 __all__ = [
     "RISK_SEVERITY",
     "AuthType",
     "Capability",
+    "CapabilityState",
+    "CapabilityStateProvider",
     "EnvScope",
     "Lifecycle",
     "Registry",
