@@ -18,10 +18,16 @@ CRM_REQUIRED_DEPS="python3 jq"
 # without lint + types + tests passing. ruff config (incl. bandit security rules
 # S) and strict mypy live in pyproject.toml. CRM_SMOKE_CMD activates once the
 # gateway serves (Phase 1g); CRM_BUILD_CMD if/when we package a wheel.
-CRM_LINT_CMD="ruff check ."
-CRM_TEST_CMD="python -m pytest tests/ -x -q"
+#
+# Tools are invoked from the project venv (.venv/bin/...) so the pipeline is
+# self-sufficient (constitution §12) and does NOT depend on a human having
+# `source .venv/bin/activate`d the shell. The phase runs each command from
+# CRM_PROJECT_ROOT, so relative .venv/bin paths resolve. `python3` (system) is
+# still required for jq/dep checks; the venv supplies python/ruff/mypy/pytest.
+CRM_LINT_CMD=".venv/bin/ruff check ."
+CRM_TEST_CMD=".venv/bin/python -m pytest tests/ -x -q"
 CRM_BUILD_CMD=""
-CRM_TYPECHECK_CMD="mypy src"
+CRM_TYPECHECK_CMD=".venv/bin/mypy src"
 
 # Container images (name:dockerfile:context entries, empty = no images)
 CRM_IMAGES=()
