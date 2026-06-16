@@ -27,6 +27,7 @@ from janus.downstream.client_manager import DownstreamClientManager
 from janus.policy.engine import ProfilePolicyEngine
 from janus.policy.profiles import load_profiles
 from janus.registry.registry import EnvScope, load_registry
+from janus.registry.schema_store import SchemaStore
 from janus.security.credential_broker import CredentialBroker
 from janus.security.output_sanitizer import OutputSanitizer
 from janus.server_mcp import create_mcp_server
@@ -34,6 +35,12 @@ from janus.server_rest import BrokerDeps, HostIdentity, create_rest_app
 
 DEFAULT_REST_PORT = 8088
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Runtime lifecycle/registry cache (approval, quarantine, descriptor hashes).
+# Distinct from the audit DB (janus.db) — different schema + lifecycle. The admin
+# CLI opens the SAME file, so both the live service and the operator see one
+# source of truth for approval/quarantine state.
+REGISTRY_DB_NAME = "janus-registry.db"
 
 
 @dataclass(frozen=True)
@@ -115,6 +122,7 @@ class Gateway:
     manager: DownstreamClientManager
     deps: BrokerDeps
     tokens: dict[str, HostIdentity]
+    store: SchemaStore
     _audit: SqliteAuditLog
     _connected: bool = field(default=False)
 
@@ -130,6 +138,10 @@ class Gateway:
         credential = CredentialBroker(env, op_path=config.op_path)
         manager = DownstreamClientManager(registry.servers, credential)
         audit = SqliteAuditLog(config.data_dir / "janus.db")
+        # The store is the runtime authority for approval/quarantine (Phase 2).
+        # Mirror the YAML registry into it; re-sync preserves runtime lifecycle.
+        store = SchemaStore(config.data_dir / REGISTRY_DB_NAME)
+        store.sync_from_registry(registry)
         sanitizer = OutputSanitizer(credential.redactor)
         deps = BrokerDeps(
             registry=registry,
@@ -137,6 +149,7 @@ class Gateway:
             policy=policy,
             audit=audit,
             sanitizer=sanitizer,
+            state=store,
             default_env=config.default_env,
         )
         return cls(
@@ -144,6 +157,7 @@ class Gateway:
             manager=manager,
             deps=deps,
             tokens=parse_tokens(env),
+            store=store,
             _audit=audit,
         )
 
@@ -156,6 +170,7 @@ class Gateway:
         if self._connected:
             await self.manager.__aexit__(None, None, None)
             self._connected = False
+        self.store.close()
         self._audit.close()
 
     def rest_app(self, lifespan: object | None = None) -> FastAPI:

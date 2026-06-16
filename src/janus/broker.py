@@ -30,6 +30,7 @@ from janus.registry.registry import (
     Registry,
     RiskTier,
 )
+from janus.registry.schema_store import CapabilityStateProvider
 from janus.security.output_sanitizer import NullSanitizer, ResultSanitizer
 
 Clock = Callable[[], datetime]
@@ -50,6 +51,7 @@ class Broker:
         audit: AuditSink,
         *,
         sanitizer: ResultSanitizer | None = None,
+        state: CapabilityStateProvider | None = None,
         session_id: str = "default",
         profile: str = "default_assistant",
         attended: bool = True,
@@ -61,6 +63,9 @@ class Broker:
         self._policy = policy
         self._audit = audit
         self._sanitizer: ResultSanitizer = sanitizer or NullSanitizer()
+        # When wired, the SchemaStore is the live authority for approval /
+        # quarantine (Phase 2); absent it, the frozen registry's flags apply.
+        self._state = state
         self._session_id = session_id
         self._profile = profile
         self._attended = attended
@@ -68,6 +73,25 @@ class Broker:
         self._clock: Clock = clock or (lambda: datetime.now(UTC))
 
     # -- helpers ------------------------------------------------------------ #
+    def _live_callable(self, cap: Capability) -> tuple[bool, str]:
+        """``(callable, state_label)`` honoring the live store when wired.
+
+        The store (Phase 2) overrides the frozen registry flags so a runtime
+        approval or drift-quarantine takes effect immediately, without a restart.
+        Falls back to the registry capability when no store is wired or the cap
+        is not yet cached.
+        """
+        approved, quarantined = cap.approved, cap.quarantined
+        if self._state is not None:
+            st = self._state.get_state(cap.id)
+            if st is not None:
+                approved, quarantined = st.approved, st.quarantined
+        if quarantined:
+            return False, "quarantined"
+        if not approved:
+            return False, "unapproved"
+        return True, "approved"
+
     def _context(self, cap: Capability, env: EnvScope) -> PolicyContext:
         return PolicyContext(
             capability=cap,
@@ -115,7 +139,9 @@ class Broker:
         env = env or self._default_env
         terms = _tokenize(query)
         scored: list[tuple[float, Capability]] = []
-        for cap in self._registry.callable_capabilities():
+        for cap in self._registry.capabilities.values():
+            if not self._live_callable(cap)[0]:
+                continue
             if env not in cap.env_scope:
                 continue
             if risk_max is not None and RISK_SEVERITY[cap.risk] > RISK_SEVERITY[risk_max]:
@@ -221,8 +247,8 @@ class Broker:
             return {"status": "error", "error": f"unknown capability '{capability_id}'"}
         env = env or self._default_env
 
-        if not cap.callable:
-            state = "quarantined" if cap.quarantined else "unapproved"
+        callable_, state = self._live_callable(cap)
+        if not callable_:
             self._audit_record(cap, env, "deny", "blocked", state, arg_keys)
             return {
                 "status": "denied",
@@ -313,7 +339,7 @@ class Broker:
                     "risk_ceiling": str(server.risk_ceiling),
                     "connected": sid in connected,
                     "capability_count": len(caps),
-                    "approved_count": sum(1 for c in caps if c.callable),
+                    "approved_count": sum(1 for c in caps if self._live_callable(c)[0]),
                     "tags": list(server.tags),
                 }
             )

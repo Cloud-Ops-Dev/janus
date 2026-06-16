@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# owner: Clayton
+# last_reviewed: 2026-06-16
+# source_of_truth_for: Janus admin CLI — approval workflow (discover/list/pending/approve/quarantine/diff) over the registry cache
+# supersedes: null
+#
+# bin/janus-admin — operator control plane for the Janus capability approval
+# workflow. Talks to the registry cache (the same SQLite the live gateway reads)
+# directly, so approvals/quarantines take effect immediately without a restart.
+# Human- and host-local ONLY — never a network endpoint (approval is not an agent
+# action). Config comes from JANUS_CONFIG_DIR / JANUS_DATA_DIR (gateway defaults).
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY="$ROOT/.venv/bin/python"
+if [[ ! -x "$PY" ]]; then
+  echo "error: $PY not found (create it: 'uv venv && uv pip install -e .[dev]')" >&2
+  exit 1
+fi
+exec "$PY" -m janus.admin "$@"

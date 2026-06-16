@@ -381,3 +381,55 @@ class SchemaStore:
         if cur.rowcount == 0:
             raise KeyError(capability_id)
         self._conn.commit()
+
+    def approve_capability(
+        self,
+        capability_id: str,
+        *,
+        raw_description_hash: str | None,
+        input_schema_hash: str | None,
+        approved_at: str,
+    ) -> None:
+        """Approve a capability and lock the reviewed hashes as its baseline.
+
+        Clears any quarantine: re-approving a drifted capability is exactly how a
+        human accepts the new descriptor as the trusted baseline.
+        """
+        cur = self._conn.execute(
+            "UPDATE capabilities SET approved = 1, quarantined = 0, "
+            "raw_description_hash = ?, input_schema_hash = ?, approved_at = ?, "
+            "quarantine_reason = NULL, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+            (raw_description_hash, input_schema_hash, approved_at, capability_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(capability_id)
+        self._conn.commit()
+
+    def quarantine_capability(self, capability_id: str, *, reason: str) -> None:
+        """Mark a capability quarantined (uncallable) until re-approved."""
+        cur = self._conn.execute(
+            "UPDATE capabilities SET quarantined = 1, quarantine_reason = ?, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+            (reason, capability_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(capability_id)
+        self._conn.commit()
+
+    def quarantine_server(self, server_id: str, *, reason: str) -> list[str]:
+        """Quarantine every capability of a server. Returns the affected ids."""
+        ids = [
+            row["id"]
+            for row in self._conn.execute(
+                "SELECT id FROM capabilities WHERE server_id = ? ORDER BY id",
+                (server_id,),
+            ).fetchall()
+        ]
+        self._conn.execute(
+            "UPDATE capabilities SET quarantined = 1, quarantine_reason = ?, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE server_id = ?",
+            (reason, server_id),
+        )
+        self._conn.commit()
+        return ids

@@ -28,6 +28,7 @@ from janus.broker import Broker
 from janus.downstream.client_manager import DownstreamClientManager
 from janus.policy.types import PolicyEngine
 from janus.registry.registry import EnvScope, Registry
+from janus.registry.schema_store import CapabilityStateProvider
 from janus.security.output_sanitizer import ResultSanitizer
 from janus.server_mcp import _parse_env, _parse_risk
 
@@ -48,6 +49,7 @@ class BrokerDeps:
     policy: PolicyEngine
     audit: AuditSink
     sanitizer: ResultSanitizer | None = None
+    state: CapabilityStateProvider | None = None
     default_env: EnvScope = EnvScope.PROD_SAFE
 
     def broker_for(self, identity: HostIdentity) -> Broker:
@@ -57,6 +59,7 @@ class BrokerDeps:
             self.policy,
             self.audit,
             sanitizer=self.sanitizer,
+            state=self.state,
             session_id=identity.label,
             profile=identity.profile,
             attended=identity.attended,
