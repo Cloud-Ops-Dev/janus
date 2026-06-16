@@ -1,0 +1,29 @@
+# owner: Clayton
+# last_reviewed: 2026-06-16
+# source_of_truth_for: Janus agent profiles — per-profile allow/confirm risk sets + permitted environments
+# supersedes: null
+#
+# Agent profiles for the policy engine (design §5.2). Deny-by-default: any risk
+# tier not listed under `allow` or `confirm` is denied. These mirror the in-code
+# DEFAULT_PROFILES; this file lets them be tuned without a code change.
+#
+# Risk tiers: read_only prod_read local_write external_write network_egress
+#             human_message_send prod_write credential_access
+#             financial_or_billing destructive
+# Env scopes: dev test prod_safe prod
+
+agent_profiles:
+  default_assistant:        # most interactive sessions
+    allowed_env: [dev, prod_safe]
+    allow: [read_only]
+    confirm: [local_write]
+
+  infra_operator:           # operator-driven infra work
+    allowed_env: [dev, test, prod_safe, prod]
+    allow: [read_only, prod_read, local_write]
+    confirm: [external_write, prod_write, destructive, network_egress]
+
+  autonomous_agent:         # unattended (Ralph / overnight) — no confirm tier
+    allowed_env: [dev, test, prod_safe]
+    allow: [read_only, local_write]
+    confirm: []

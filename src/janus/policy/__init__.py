@@ -1,9 +1,12 @@
-"""Policy contracts (Decision/PolicyContext/PolicyDecision/PolicyEngine).
+"""Policy: deny-by-default engine, agent profiles, risk tiers, env gates.
 
-The concrete deny-by-default engine, risk tiers, and agent profiles land in
-infra-22q.4; this package defines the interface the broker enforces against.
+The broker enforces against the :class:`PolicyEngine` contract; the concrete
+:class:`ProfilePolicyEngine` resolves allow/confirm/deny from per-profile risk
+sets and environment gates.
 """
 
+from janus.policy.engine import ProfilePolicyEngine
+from janus.policy.profiles import DEFAULT_PROFILES, AgentProfile, load_profiles
 from janus.policy.types import (
     Decision,
     PolicyContext,
@@ -12,8 +15,12 @@ from janus.policy.types import (
 )
 
 __all__ = [
+    "DEFAULT_PROFILES",
+    "AgentProfile",
     "Decision",
     "PolicyContext",
     "PolicyDecision",
     "PolicyEngine",
+    "ProfilePolicyEngine",
+    "load_profiles",
 ]
