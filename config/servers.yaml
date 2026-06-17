@@ -1,5 +1,5 @@
 # owner: Clayton
-# last_reviewed: 2026-06-16
+# last_reviewed: 2026-06-17
 # source_of_truth_for: Janus downstream MCP server registry — transport, trust, risk ceiling, env scope (Phase-1 seed)
 # supersedes: null
 #
@@ -23,6 +23,10 @@ servers:
     auth:
       type: bearer
       secret_env: JANUS_OPEN_BRAIN_TOKEN
+      # Open Brain authenticates with a bearer token AND an x-brain-key header.
+      # header NAME -> env-var NAME holding its value (resolved at runtime).
+      extra_headers:
+        x-brain-key: JANUS_OPEN_BRAIN_KEY
     lifecycle: always_on
     trust_level: first_party
     # ceiling allows the Phase-3 write capabilities (capture/update); Phase-1

@@ -190,6 +190,51 @@ servers:
         load_registry(cfg)
 
 
+def test_seed_open_brain_declares_extra_header() -> None:
+    registry = load_registry(SEED_CONFIG)
+    auth = registry.servers["open_brain"].auth
+    # header NAME -> env-var NAME (no secret values in the public seed).
+    assert auth.extra_headers == {"x-brain-key": "JANUS_OPEN_BRAIN_KEY"}
+
+
+def test_extra_headers_loaded(tmp_path: Path) -> None:
+    servers = """
+servers:
+  s1:
+    display_name: S1
+    transport: streamable_http
+    endpoint_env: S1_URL
+    auth:
+      type: bearer
+      secret_env: S1_TOKEN
+      extra_headers:
+        x-brain-key: S1_BRAIN_KEY
+    default_env_scope: [dev]
+"""
+    cfg = _write_config(tmp_path, servers, "capabilities: {}")
+    registry = load_registry(cfg)
+    assert registry.servers["s1"].auth.extra_headers == {"x-brain-key": "S1_BRAIN_KEY"}
+
+
+def test_extra_headers_reject_empty_env_name(tmp_path: Path) -> None:
+    servers = """
+servers:
+  s1:
+    display_name: S1
+    transport: streamable_http
+    endpoint_env: S1_URL
+    auth:
+      type: bearer
+      secret_env: S1_TOKEN
+      extra_headers:
+        x-brain-key: ""
+    default_env_scope: [dev]
+"""
+    cfg = _write_config(tmp_path, servers, "capabilities: {}")
+    with pytest.raises(RegistryError, match="non-empty"):
+        load_registry(cfg)
+
+
 def test_missing_file_rejected(tmp_path: Path) -> None:
     with pytest.raises(RegistryError, match="not found"):
         load_registry(tmp_path)

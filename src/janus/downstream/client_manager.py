@@ -69,6 +69,8 @@ class ConnectionResolver(Protocol):
 
     def resolve_secret(self, server: Server) -> str | None: ...
 
+    def resolve_header_secret(self, env_name: str) -> str | None: ...
+
 
 class EnvConnectionResolver:
     """Phase-1 resolver: read endpoint/command/secret from named env vars.
@@ -97,6 +99,9 @@ class EnvConnectionResolver:
         if server.auth.secret_env:
             return self._environ.get(server.auth.secret_env)
         return None
+
+    def resolve_header_secret(self, env_name: str) -> str | None:
+        return self._environ.get(env_name)
 
 
 # --------------------------------------------------------------------------- #
@@ -229,14 +234,25 @@ class DownstreamClientManager:
         return StreamableHttpParameters(url=url, headers=headers)
 
     def _build_auth_headers(self, server: Server) -> dict[str, str] | None:
+        headers: dict[str, str] = {}
         if server.auth.type is AuthType.BEARER:
             secret = self._resolver.resolve_secret(server)
             if not secret:
                 raise DownstreamError(
                     f"server '{server.id}': bearer auth declared but secret unresolved"
                 )
-            return {"Authorization": f"Bearer {secret}"}
-        return None
+            headers["Authorization"] = f"Bearer {secret}"
+        # Additional static headers (e.g. Open Brain's x-brain-key). Each value
+        # comes from a named env var; a declared-but-unset header is fatal (§12).
+        for header_name, env_name in server.auth.extra_headers.items():
+            value = self._resolver.resolve_header_secret(env_name)
+            if not value:
+                raise DownstreamError(
+                    f"server '{server.id}': extra header '{header_name}' declared "
+                    f"but env '{env_name}' is unset"
+                )
+            headers[header_name] = value
+        return headers or None
 
     async def connect_server(self, server_id: str) -> None:
         if self._group is None:

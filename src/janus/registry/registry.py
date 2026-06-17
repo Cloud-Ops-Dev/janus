@@ -109,6 +109,13 @@ class ServerAuth(BaseModel):
     ``secret_env`` names an environment variable holding the secret
     (public-repo-safe). ``secret_ref`` is an ``op://`` reference resolved by the
     credential broker — used only in gitignored local overlays, never committed.
+
+    ``extra_headers`` supports downstreams that need more than the single
+    ``Authorization: Bearer`` header (e.g. Open Brain wants both a bearer token
+    and an ``x-brain-key`` header). It maps a header NAME to the NAME of the
+    environment variable holding that header's value — public-repo-safe, since
+    only names are committed; the values are resolved at runtime and redacted
+    from logs by the credential broker.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -116,6 +123,7 @@ class ServerAuth(BaseModel):
     type: AuthType = AuthType.NONE
     secret_env: str | None = None
     secret_ref: str | None = None
+    extra_headers: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_secret(self) -> ServerAuth:
@@ -126,6 +134,12 @@ class ServerAuth(BaseModel):
             raise ValueError(
                 f"auth type '{self.type.value}' requires secret_env or secret_ref"
             )
+        for header_name, env_name in self.extra_headers.items():
+            if not header_name or not env_name:
+                raise ValueError(
+                    "extra_headers entries require a non-empty header name and "
+                    "a non-empty env-var name"
+                )
         return self
 
 

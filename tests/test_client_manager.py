@@ -15,6 +15,7 @@ import pytest
 
 from janus.downstream import (
     DownstreamClientManager,
+    DownstreamError,
     DownstreamNotConnected,
     EnvConnectionResolver,
 )
@@ -180,3 +181,56 @@ def test_env_resolver_defers_op_ref_to_broker() -> None:
     resolver = EnvConnectionResolver({"X_URL": "http://h:9/mcp"})
     # op:// is the credential broker's job (infra-22q.5) — not resolved here.
     assert resolver.resolve_secret(server) is None
+
+
+def test_env_resolver_resolves_header_secret() -> None:
+    resolver = EnvConnectionResolver({"X_BRAIN_KEY": "sb_xyz"})
+    assert resolver.resolve_header_secret("X_BRAIN_KEY") == "sb_xyz"
+    assert resolver.resolve_header_secret("MISSING") is None
+
+
+# --------------------------------------------------------------------------- #
+# Auth header construction (multi-header, infra-xwx part 1)
+# --------------------------------------------------------------------------- #
+def _http_server_with_extra_headers() -> Server:
+    return Server(
+        id="open_brain",
+        display_name="Open Brain",
+        transport=Transport.STREAMABLE_HTTP,
+        endpoint_env="OB_URL",
+        auth=ServerAuth(
+            type=AuthType.BEARER,
+            secret_env="OB_TOKEN",  # noqa: S106 — env-var NAME
+            extra_headers={"x-brain-key": "OB_BRAIN_KEY"},
+        ),
+        default_env_scope=[EnvScope.DEV],
+    )
+
+
+def test_build_auth_headers_bearer_plus_extra() -> None:
+    resolver = EnvConnectionResolver({"OB_TOKEN": "tok123", "OB_BRAIN_KEY": "sb_abc"})
+    mgr = DownstreamClientManager({}, resolver)
+    headers = mgr._build_auth_headers(_http_server_with_extra_headers())
+    assert headers == {"Authorization": "Bearer tok123", "x-brain-key": "sb_abc"}
+
+
+def test_build_auth_headers_extra_only_no_bearer() -> None:
+    server = Server(
+        id="s",
+        display_name="S",
+        transport=Transport.STREAMABLE_HTTP,
+        endpoint_env="S_URL",
+        auth=ServerAuth(extra_headers={"x-api-key": "S_KEY"}),
+        default_env_scope=[EnvScope.DEV],
+    )
+    resolver = EnvConnectionResolver({"S_KEY": "k9"})
+    mgr = DownstreamClientManager({}, resolver)
+    assert mgr._build_auth_headers(server) == {"x-api-key": "k9"}
+
+
+def test_build_auth_headers_missing_extra_header_is_fatal() -> None:
+    # bearer present but the declared extra-header env var is unset -> §12 loud fail.
+    resolver = EnvConnectionResolver({"OB_TOKEN": "tok123"})
+    mgr = DownstreamClientManager({}, resolver)
+    with pytest.raises(DownstreamError, match="x-brain-key"):
+        mgr._build_auth_headers(_http_server_with_extra_headers())

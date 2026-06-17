@@ -35,6 +35,14 @@ def test_resolve_secret_from_env_and_registers_redaction() -> None:
     assert "«redacted»" in broker.redactor.redact(f"auth uses {SAMPLE} here")
 
 
+def test_resolve_header_secret_from_env_and_registers_redaction() -> None:
+    broker = CredentialBroker({"OB_BRAIN_KEY": SAMPLE})
+    assert broker.resolve_header_secret("OB_BRAIN_KEY") == SAMPLE
+    # extra-header values are secrets too -> registered for log redaction.
+    assert "«redacted»" in broker.redactor.redact(f"x-brain-key: {SAMPLE}")
+    assert broker.resolve_header_secret("MISSING") is None
+
+
 def test_resolve_endpoint_and_command() -> None:
     broker = CredentialBroker({"OB_URL": "http://h:9/mcp"})
     assert broker.resolve_endpoint(_http_server(secret_env="X")) == "http://h:9/mcp"  # noqa: S106

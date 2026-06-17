@@ -74,6 +74,13 @@ class CredentialBroker:
             return self._resolve_op_ref(auth.secret_ref)
         return None
 
+    def resolve_header_secret(self, env_name: str) -> str | None:
+        # Extra-header values (e.g. open_brain's x-brain-key) are secrets too:
+        # register with the redactor so they never surface in logs.
+        value = self._environ.get(env_name)
+        self.redactor.register(value)
+        return value
+
     # -- op:// resolution --------------------------------------------------- #
     def _resolve_op_ref(self, ref: str) -> str:
         if not ref.startswith("op://"):

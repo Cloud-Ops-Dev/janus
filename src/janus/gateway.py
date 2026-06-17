@@ -109,6 +109,12 @@ def check_environment(config: GatewayConfig, environ: Mapping[str, str]) -> list
             problems.append(f"server '{sid}': secret env '{server.auth.secret_env}' is unset")
         if server.auth.secret_ref:
             needs_op = True
+        for header_name, env_name in server.auth.extra_headers.items():
+            if not environ.get(env_name):
+                problems.append(
+                    f"server '{sid}': extra-header env '{env_name}' "
+                    f"(for header '{header_name}') is unset"
+                )
     if needs_op and not environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
         problems.append("op:// secret refs declared but OP_SERVICE_ACCOUNT_TOKEN is unset")
     if not parse_tokens(environ):
