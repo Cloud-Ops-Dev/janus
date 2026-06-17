@@ -31,6 +31,7 @@ from janus.policy.trifecta import TrifectaGuard
 from janus.policy.types import PolicyEngine
 from janus.registry.registry import EnvScope, Registry
 from janus.registry.schema_store import CapabilityStateProvider
+from janus.search.ranker import BlendedRanker
 from janus.security.output_sanitizer import ResultSanitizer
 from janus.server_mcp import _parse_env, _parse_risk
 
@@ -56,6 +57,9 @@ class BrokerDeps:
     # trifecta legs persist between its calls; the alerter pings trifecta denials.
     trifecta: TrifectaGuard | None = None
     alerter: Alerter | None = None
+    # Phase 5: one prepared blended ranker shared across brokers (cap vectors are
+    # precomputed once); None -> keyword search.
+    ranker: BlendedRanker | None = None
     default_env: EnvScope = EnvScope.PROD_SAFE
 
     def broker_for(self, identity: HostIdentity) -> Broker:
@@ -68,6 +72,7 @@ class BrokerDeps:
             state=self.state,
             trifecta=self.trifecta,
             alerter=self.alerter,
+            ranker=self.ranker,
             session_id=identity.label,
             profile=identity.profile,
             attended=identity.attended,

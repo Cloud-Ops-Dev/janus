@@ -31,6 +31,7 @@ from janus.policy.profiles import load_profiles
 from janus.policy.trifecta import TrifectaGuard
 from janus.registry.registry import EnvScope, load_registry
 from janus.registry.schema_store import SchemaStore
+from janus.search.ranker import BlendedRanker
 from janus.security.credential_broker import CredentialBroker
 from janus.security.output_sanitizer import OutputSanitizer
 from janus.server_mcp import create_mcp_server
@@ -160,6 +161,9 @@ class Gateway:
         store = SchemaStore(config.data_dir / REGISTRY_DB_NAME)
         store.sync_from_registry(registry)
         sanitizer = OutputSanitizer(credential.redactor)
+        # Phase 5: build the blended ranker once and precompute capability vectors.
+        ranker = BlendedRanker()
+        ranker.prepare(registry.capabilities)
         deps = BrokerDeps(
             registry=registry,
             manager=manager,
@@ -169,6 +173,7 @@ class Gateway:
             state=store,
             trifecta=TrifectaGuard(),
             alerter=build_alerter(env),
+            ranker=ranker,
             default_env=config.default_env,
         )
         return cls(

@@ -34,6 +34,7 @@ from janus.registry.registry import (
     Server,
 )
 from janus.registry.schema_store import CapabilityStateProvider
+from janus.search.ranker import BlendedRanker
 from janus.security.output_sanitizer import NullSanitizer, ResultSanitizer
 
 Clock = Callable[[], datetime]
@@ -57,6 +58,7 @@ class Broker:
         state: CapabilityStateProvider | None = None,
         trifecta: TrifectaGuard | None = None,
         alerter: Alerter | None = None,
+        ranker: BlendedRanker | None = None,
         session_id: str = "default",
         profile: str = "default_assistant",
         attended: bool = True,
@@ -75,6 +77,8 @@ class Broker:
         # brokers so accumulated legs persist between calls; None disables it.
         self._trifecta = trifecta
         self._alerter: Alerter = alerter or NullAlerter()
+        # Phase 5: semantic blended ranker; None -> Phase-1 keyword scoring.
+        self._ranker = ranker
         self._session_id = session_id
         self._profile = profile
         self._attended = attended
@@ -144,10 +148,15 @@ class Broker:
         max_results: int = 10,
         risk_max: RiskTier | None = None,
     ) -> dict[str, Any]:
-        """Ranked short list of policy-allowed capabilities (NO full schemas)."""
+        """Ranked short list of policy-allowed capabilities (NO full schemas).
+
+        Hard filters (callable, env scope, risk ceiling, policy DENY) build the
+        candidate set first; a Phase-5 :class:`BlendedRanker`, when wired, then
+        orders the survivors semantically. Without a ranker, the Phase-1 keyword
+        overlap scorer is used.
+        """
         env = env or self._default_env
-        terms = _tokenize(query)
-        scored: list[tuple[float, Capability]] = []
+        candidates: list[Capability] = []
         for cap in self._registry.capabilities.values():
             if not self._live_callable(cap)[0]:
                 continue
@@ -155,16 +164,25 @@ class Broker:
                 continue
             if risk_max is not None and RISK_SEVERITY[cap.risk] > RISK_SEVERITY[risk_max]:
                 continue
-            decision = self._policy.evaluate(self._context(cap, env))
             # Denied tools never surface as normal results (design §7).
-            if decision.decision is Decision.DENY:
+            if self._policy.evaluate(self._context(cap, env)).decision is Decision.DENY:
                 continue
-            score = self._score(terms, cap)
-            if terms and score <= 0:
-                continue
-            scored.append((score, cap))
-        scored.sort(key=lambda pair: (pair[0], pair[1].id), reverse=True)
-        results = [self._search_row(cap, env) for _score, cap in scored[:max_results]]
+            candidates.append(cap)
+
+        if self._ranker is not None:
+            connected = set(self._manager.connected_servers)
+            ranked = self._ranker.rank(query, candidates, connected=connected)
+        else:
+            terms = _tokenize(query)
+            keyword_scored = [
+                (self._score(terms, cap), cap)
+                for cap in candidates
+                if not (terms and self._score(terms, cap) <= 0)
+            ]
+            keyword_scored.sort(key=lambda pair: (pair[0], pair[1].id), reverse=True)
+            ranked = keyword_scored
+
+        results = [self._search_row(cap, env) for _score, cap in ranked[:max_results]]
         return {"query": query, "env": str(env), "count": len(results), "results": results}
 
     @staticmethod
