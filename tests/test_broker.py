@@ -257,18 +257,29 @@ def test_policy_explain() -> None:
 # --------------------------------------------------------------------------- #
 # FastMCP server surface
 # --------------------------------------------------------------------------- #
-def test_mcp_server_exposes_seven_tools() -> None:
+_CORE_TOOLS = {
+    "capability_search",
+    "capability_describe",
+    "capability_call",
+    "server_list",
+    "server_health",
+    "policy_explain",
+    "audit_recent",
+}
+
+
+def test_mcp_server_exposes_core_seven_tools() -> None:
     mgr = DownstreamClientManager(_registry().servers)
-    broker = _broker(mgr)
-    server = create_mcp_server(broker)
-    tools = asyncio.run(server.list_tools())
-    names = {t.name for t in tools}
-    assert names == {
-        "capability_search",
-        "capability_describe",
-        "capability_call",
-        "server_list",
-        "server_health",
-        "policy_explain",
-        "audit_recent",
-    }
+    server = create_mcp_server(_broker(mgr), dynamic_exposure=False)
+    names = {t.name for t in asyncio.run(server.list_tools())}
+    assert names == _CORE_TOOLS
+
+
+def test_mcp_server_with_dynamic_exposure_stays_under_ten_tools() -> None:
+    mgr = DownstreamClientManager(_registry().servers)
+    server = create_mcp_server(_broker(mgr))  # dynamic_exposure on by default
+    names = {t.name for t in asyncio.run(server.list_tools())}
+    # core 7 + capability_expose/unexpose = 9 (design: model sees < 10 tools).
+    assert _CORE_TOOLS <= names
+    assert names == _CORE_TOOLS | {"capability_expose", "capability_unexpose"}
+    assert len(names) < 10

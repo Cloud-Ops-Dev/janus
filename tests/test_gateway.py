@@ -160,7 +160,8 @@ def test_end_to_end_stdio_phase1_acceptance(tmp_path: Path) -> None:
 
             tools = await session.list_tools()
             names = {t.name for t in tools.tools}
-            assert len(names) == 7  # the model sees < 10 gateway tools
+            # core 7 + capability_expose/unexpose (Phase 6) = 9; still < 10.
+            assert len(names) < 10
             assert "capability_search" in names
 
             search = _payload(await session.call_tool("capability_search", {"query": "echo"}))

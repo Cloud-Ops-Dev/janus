@@ -12,6 +12,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from janus.broker import Broker
+from janus.exposure import DynamicToolExposer
 from janus.registry.registry import EnvScope, RiskTier
 
 
@@ -27,9 +28,18 @@ def _parse_risk(risk: str | None) -> RiskTier | None:
     return RiskTier(risk)
 
 
-def create_mcp_server(broker: Broker, *, name: str = "janus") -> FastMCP:
-    """Build the Janus FastMCP server bound to a broker instance."""
+def create_mcp_server(
+    broker: Broker, *, name: str = "janus", dynamic_exposure: bool = True
+) -> FastMCP:
+    """Build the Janus FastMCP server bound to a broker instance.
+
+    ``dynamic_exposure`` (Phase 6) adds ``capability_expose`` / ``capability_
+    unexpose`` so clients that handle ``tools/list_changed`` can surface searched
+    capabilities as native tools. It is purely additive — the core 7 tools and
+    the universal ``capability_call`` fallback are unchanged.
+    """
     mcp: FastMCP = FastMCP(name)
+    exposer = DynamicToolExposer(mcp, broker)
 
     @mcp.tool
     async def capability_search(
@@ -103,5 +113,27 @@ def create_mcp_server(broker: Broker, *, name: str = "janus") -> FastMCP:
     async def audit_recent(limit: int = 20) -> dict[str, Any]:
         """Recent brokered invocations (allow/confirm/deny) for this session."""
         return broker.audit_recent(limit)
+
+    if dynamic_exposure:
+
+        @mcp.tool
+        async def capability_expose(
+            capability_ids: list[str], env: str | None = None
+        ) -> dict[str, Any]:
+            """Surface the given capabilities as native MCP tools (with their real
+            schemas) for clients that handle tools/list_changed. Policy-denied
+            capabilities are skipped. capability_call remains the fallback."""
+            try:
+                return await exposer.expose(capability_ids, _parse_env(env))
+            except ValueError as exc:
+                return {"error": str(exc)}
+
+        @mcp.tool
+        async def capability_unexpose(
+            tool_names: list[str] | None = None,
+        ) -> dict[str, Any]:
+            """Remove dynamically-exposed native tools (all of them if tool_names
+            is omitted)."""
+            return exposer.unexpose(tool_names)
 
     return mcp
