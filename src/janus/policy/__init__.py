@@ -7,6 +7,12 @@ sets and environment gates.
 
 from janus.policy.engine import ProfilePolicyEngine
 from janus.policy.profiles import DEFAULT_PROFILES, AgentProfile, load_profiles
+from janus.policy.trifecta import (
+    TrifectaAssessment,
+    TrifectaGuard,
+    TrifectaLeg,
+    legs_for,
+)
 from janus.policy.types import (
     Decision,
     PolicyContext,
@@ -22,5 +28,9 @@ __all__ = [
     "PolicyDecision",
     "PolicyEngine",
     "ProfilePolicyEngine",
+    "TrifectaAssessment",
+    "TrifectaGuard",
+    "TrifectaLeg",
+    "legs_for",
     "load_profiles",
 ]

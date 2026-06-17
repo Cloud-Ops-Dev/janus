@@ -32,7 +32,12 @@ def _write_config(
 # --------------------------------------------------------------------------- #
 def test_seed_config_loads_and_is_valid() -> None:
     registry = load_registry(SEED_CONFIG)
-    assert set(registry.servers) == {"open_brain", "beads_readonly", "paperclip"}
+    assert set(registry.servers) == {
+        "open_brain",
+        "beads_readonly",
+        "beads_operator",
+        "paperclip",
+    }
     assert len(registry.capabilities) >= 9
     # every seed capability is approved, not quarantined -> callable
     assert all(c.callable for c in registry.capabilities.values())
@@ -52,6 +57,7 @@ def test_capabilities_for_server() -> None:
         "search_thoughts",
         "list_thoughts",
         "thought_stats",
+        "capture_thought",
     }
 
 

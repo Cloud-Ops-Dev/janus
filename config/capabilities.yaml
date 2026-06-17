@@ -1,6 +1,6 @@
 # owner: Clayton
-# last_reviewed: 2026-06-16
-# source_of_truth_for: Janus brokered-capability registry — one entry per approved downstream tool (Phase-1 seed)
+# last_reviewed: 2026-06-18
+# source_of_truth_for: Janus brokered-capability registry — one entry per approved downstream tool (Phase-1 seed + Phase-3 writes)
 # supersedes: null
 #
 # Janus capability registry — Phase 1 seed (read-only, first-party).
@@ -46,6 +46,22 @@ capabilities:
     approved: true
     tags: [memory, stats]
 
+  # --- Open Brain — write (Phase 3, behind confirmation) -------------------- #
+  # capture_thought sends content to the cloud memory service, so it carries the
+  # external_write risk tier (an EXTERNAL_COMM leg of the lethal trifecta) and is
+  # flagged requires_confirmation. default_assistant denies it; infra_operator
+  # confirms it; the trifecta guard escalates it once the session is tainted.
+  open_brain.capture_thought:
+    server_id: open_brain
+    downstream_tool_name: capture_thought
+    title: Capture an Open Brain thought
+    summary: Write a new durable thought to semantic memory.
+    risk: external_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    requires_confirmation: true
+    tags: [memory, write, capture]
+
   # --- Beads (issue tracker) — read ----------------------------------------- #
   beads_readonly.list:
     server_id: beads_readonly
@@ -86,6 +102,40 @@ capabilities:
     env_scope: [dev, test, prod_safe]
     approved: true
     tags: [issues, stats]
+
+  # --- Beads (issue tracker) — write (Phase 3, local_write) ----------------- #
+  # Local-write tier: default_assistant confirms, autonomous_agent allows (it is
+  # in its allow set), infra_operator allows. Distinct server_id from the
+  # read-only surface so the write ceiling is enforced independently.
+  beads_operator.create:
+    server_id: beads_operator
+    downstream_tool_name: create_issue
+    title: Create a beads issue
+    summary: Open a new issue with title, type, and priority.
+    risk: local_write
+    env_scope: [dev, test, prod_safe]
+    approved: true
+    tags: [issues, write, create]
+
+  beads_operator.update:
+    server_id: beads_operator
+    downstream_tool_name: update_issue
+    title: Update a beads issue
+    summary: Change an issue's status, priority, or fields.
+    risk: local_write
+    env_scope: [dev, test, prod_safe]
+    approved: true
+    tags: [issues, write, update]
+
+  beads_operator.close:
+    server_id: beads_operator
+    downstream_tool_name: close_issue
+    title: Close a beads issue
+    summary: Close an issue with a resolution reason.
+    risk: local_write
+    env_scope: [dev, test, prod_safe]
+    approved: true
+    tags: [issues, write, close]
 
   # --- Paperclip (agent platform) — read ------------------------------------ #
   paperclip.list_companies:

@@ -18,10 +18,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from janus.audit.types import AuditEntry, AuditSink
+from janus.discovery.alerts import Alerter, NullAlerter
 from janus.downstream.client_manager import (
     DownstreamClientManager,
     DownstreamError,
 )
+from janus.policy.trifecta import TrifectaGuard, legs_for
 from janus.policy.types import Decision, PolicyContext, PolicyEngine
 from janus.registry.registry import (
     RISK_SEVERITY,
@@ -29,6 +31,7 @@ from janus.registry.registry import (
     EnvScope,
     Registry,
     RiskTier,
+    Server,
 )
 from janus.registry.schema_store import CapabilityStateProvider
 from janus.security.output_sanitizer import NullSanitizer, ResultSanitizer
@@ -52,6 +55,8 @@ class Broker:
         *,
         sanitizer: ResultSanitizer | None = None,
         state: CapabilityStateProvider | None = None,
+        trifecta: TrifectaGuard | None = None,
+        alerter: Alerter | None = None,
         session_id: str = "default",
         profile: str = "default_assistant",
         attended: bool = True,
@@ -66,6 +71,10 @@ class Broker:
         # When wired, the SchemaStore is the live authority for approval /
         # quarantine (Phase 2); absent it, the frozen registry's flags apply.
         self._state = state
+        # Lethal-trifecta session guard (Phase 3). Shared across this session's
+        # brokers so accumulated legs persist between calls; None disables it.
+        self._trifecta = trifecta
+        self._alerter: Alerter = alerter or NullAlerter()
         self._session_id = session_id
         self._profile = profile
         self._attended = attended
@@ -256,6 +265,7 @@ class Broker:
                 "reason": f"capability is {state}",
             }
 
+        server = self._registry.servers[cap.server_id]
         decision = self._policy.evaluate(self._context(cap, env))
 
         if decision.decision is Decision.DENY:
@@ -267,6 +277,32 @@ class Broker:
             }
 
         confirm_tier = decision.decision is Decision.CONFIRM
+        confirm_reason = decision.reason
+        trifecta_gated = False
+
+        # Lethal-trifecta guard (Phase 3): an otherwise-permitted external-comm
+        # call is escalated once the session already holds the other two legs.
+        # The guard only ever escalates — a policy DENY above already returned.
+        if self._trifecta is not None:
+            assessment = self._trifecta.assess(self._session_id, cap, server)
+            if assessment.gated:
+                trifecta_gated = True
+                confirm_reason = assessment.reason
+                if not self._attended:
+                    hard = f"unattended session: {assessment.reason}"
+                    self._audit_record(cap, env, "deny", "blocked", hard, arg_keys)
+                    self._alert(
+                        f"🛑 Janus DENY (lethal trifecta) — session '{self._session_id}' "
+                        f"profile '{self._profile}' blocked '{cap.id}': {assessment.reason}"
+                    )
+                    return {
+                        "status": "denied",
+                        "capability_id": cap.id,
+                        "reason": hard,
+                        "trifecta": True,
+                    }
+                confirm_tier = True  # attended -> require explicit confirmation
+
         if confirm_tier:
             if not self._attended:
                 # Locked operator decision (2026-06-16): unattended confirm-tier
@@ -278,19 +314,14 @@ class Broker:
                 # Surface a confirmation requirement for the caller (REST/CLI, or
                 # an MCP client that re-calls with confirm) to satisfy.
                 self._audit_record(
-                    cap, env, "confirm", "needs_confirmation", decision.reason, arg_keys
+                    cap, env, "confirm", "needs_confirmation", confirm_reason, arg_keys
                 )
                 return {
                     "status": "needs_confirmation",
                     "capability_id": cap.id,
-                    "reason": decision.reason,
-                    "preview": {
-                        "server_id": cap.server_id,
-                        "downstream_tool": cap.downstream_tool_name,
-                        "risk": str(cap.risk),
-                        "env": str(env),
-                        "arg_keys": arg_keys,
-                    },
+                    "reason": confirm_reason,
+                    "trifecta": trifecta_gated,
+                    "preview": self._preview(cap, server, env, arg_keys, trifecta_gated),
                 }
 
         # ALLOW (or confirmed CONFIRM) — execute downstream.
@@ -307,11 +338,14 @@ class Broker:
             )
             return {"status": "error", "capability_id": cap.id, "error": str(exc)}
 
-        server = self._registry.servers[cap.server_id]
         result = self._sanitizer.sanitize(result, trust_level=server.trust_level)
         latency = self._elapsed_ms(started)
         status = "error" if result.is_error else "ok"
         self._audit_record(cap, env, audit_decision, status, reason, arg_keys, latency)
+        # The call reached the downstream — fold its trifecta legs into the
+        # session so a later external-comm call sees the accumulated exposure.
+        if self._trifecta is not None:
+            self._trifecta.record(self._session_id, cap, server)
         return {
             "status": status,
             "capability_id": cap.id,
@@ -322,6 +356,36 @@ class Broker:
 
     def _elapsed_ms(self, started: datetime) -> float:
         return (self._clock() - started).total_seconds() * 1000.0
+
+    def _preview(
+        self,
+        cap: Capability,
+        server: Server,
+        env: EnvScope,
+        arg_keys: list[str],
+        trifecta: bool,
+    ) -> dict[str, Any]:
+        """Human-readable action preview shown with a confirmation requirement."""
+        return {
+            "action": f"call '{cap.downstream_tool_name}' on {server.display_name}",
+            "server_id": cap.server_id,
+            "downstream_tool": cap.downstream_tool_name,
+            "risk": str(cap.risk),
+            "env": str(env),
+            "arg_keys": arg_keys,
+            "trifecta": trifecta,
+        }
+
+    def _alert(self, message: str) -> None:
+        """Best-effort out-of-band alert (Discord). Never raises, never blocks.
+
+        Enforcement (deny + audit) has already happened before this is called, so
+        a dead webhook must not turn a clean deny into an error response.
+        """
+        try:
+            self._alerter.send(message)
+        except Exception:  # noqa: BLE001, S110 — alerting must never break enforcement
+            pass
 
     # -- 4. server_list ---------------------------------------------------- #
     def server_list(self) -> dict[str, Any]:
@@ -371,6 +435,7 @@ class Broker:
         if cap is None:
             return {"error": f"unknown capability '{capability_id}'"}
         env = env or self._default_env
+        server = self._registry.servers[cap.server_id]
         decision = self._policy.evaluate(self._context(cap, env))
         return {
             "capability_id": cap.id,
@@ -381,6 +446,14 @@ class Broker:
             "requires_confirmation": cap.requires_confirmation,
             "decision": str(decision.decision),
             "reason": decision.reason,
+            # Static lethal-trifecta legs this capability lights (the runtime
+            # guard escalates only when a call would complete the combination).
+            "trifecta_legs": sorted(legs_for(cap, server)),
+            "session_trifecta_legs": (
+                sorted(self._trifecta.session_legs(self._session_id))
+                if self._trifecta is not None
+                else []
+            ),
         }
 
     # -- 7. audit_recent --------------------------------------------------- #

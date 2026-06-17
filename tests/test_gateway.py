@@ -119,7 +119,8 @@ def test_gateway_build_and_connect(tmp_path: Path) -> None:
 
 def test_seed_config_is_loadable() -> None:
     registry = load_registry(SEED_CONFIG)
-    assert len(registry.servers) == 3
+    # open_brain, beads_readonly, beads_operator, paperclip (Phase-3 split).
+    assert len(registry.servers) == 4
 
 
 # --------------------------------------------------------------------------- #

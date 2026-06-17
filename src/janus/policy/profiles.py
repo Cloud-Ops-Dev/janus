@@ -66,6 +66,18 @@ DEFAULT_PROFILES: dict[str, AgentProfile] = {
         allow=[RiskTier.READ_ONLY, RiskTier.LOCAL_WRITE],
         confirm=[],
     ),
+    # A browsing/research agent that is ALLOWED network egress (it must fetch the
+    # web). That allowance is exactly the lethal-trifecta exposure: once it has
+    # also read first-party private data and ingested untrusted web content, an
+    # egress call can exfiltrate. The TrifectaGuard escalates that completing
+    # call to confirmation (attended) or hard-deny (unattended) — policy alone
+    # would let it through.
+    "research_agent": _profile(
+        "research_agent",
+        allowed_env=[EnvScope.DEV, EnvScope.PROD_SAFE],
+        allow=[RiskTier.READ_ONLY, RiskTier.NETWORK_EGRESS],
+        confirm=[RiskTier.LOCAL_WRITE],
+    ),
 }
 
 

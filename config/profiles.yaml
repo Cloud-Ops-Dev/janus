@@ -1,5 +1,5 @@
 # owner: Clayton
-# last_reviewed: 2026-06-16
+# last_reviewed: 2026-06-18
 # source_of_truth_for: Janus agent profiles — per-profile allow/confirm risk sets + permitted environments
 # supersedes: null
 #
@@ -27,3 +27,8 @@ agent_profiles:
     allowed_env: [dev, test, prod_safe]
     allow: [read_only, local_write]
     confirm: []
+
+  research_agent:           # browsing agent: egress ALLOWED -> trifecta guard is the control
+    allowed_env: [dev, prod_safe]
+    allow: [read_only, network_egress]
+    confirm: [local_write]

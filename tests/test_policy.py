@@ -159,7 +159,12 @@ def test_engine_satisfies_policy_engine_protocol() -> None:
 
 def test_seed_profiles_yaml_loads_and_matches_defaults() -> None:
     profiles = load_profiles(REPO_ROOT / "config" / "profiles.yaml")
-    assert set(profiles) == {"default_assistant", "infra_operator", "autonomous_agent"}
+    assert set(profiles) == {
+        "default_assistant",
+        "infra_operator",
+        "autonomous_agent",
+        "research_agent",
+    }
     engine = ProfilePolicyEngine(profiles)
     ctx = PolicyContext(
         capability=_cap(RiskTier.LOCAL_WRITE),

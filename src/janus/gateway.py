@@ -23,9 +23,11 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from janus.audit.audit_log import SqliteAuditLog
+from janus.discovery.alerts import build_alerter
 from janus.downstream.client_manager import DownstreamClientManager
 from janus.policy.engine import ProfilePolicyEngine
 from janus.policy.profiles import load_profiles
+from janus.policy.trifecta import TrifectaGuard
 from janus.registry.registry import EnvScope, load_registry
 from janus.registry.schema_store import SchemaStore
 from janus.security.credential_broker import CredentialBroker
@@ -156,6 +158,8 @@ class Gateway:
             audit=audit,
             sanitizer=sanitizer,
             state=store,
+            trifecta=TrifectaGuard(),
+            alerter=build_alerter(env),
             default_env=config.default_env,
         )
         return cls(

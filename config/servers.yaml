@@ -1,5 +1,5 @@
 # owner: Clayton
-# last_reviewed: 2026-06-17
+# last_reviewed: 2026-06-18
 # source_of_truth_for: Janus downstream MCP server registry — transport, trust, risk ceiling, env scope (Phase-1 seed)
 # supersedes: null
 #
@@ -29,9 +29,10 @@ servers:
         x-brain-key: JANUS_OPEN_BRAIN_KEY
     lifecycle: always_on
     trust_level: first_party
-    # ceiling allows the Phase-3 write capabilities (capture/update); Phase-1
-    # only declares read_only capabilities, kept well under the ceiling.
-    risk_ceiling: local_write
+    # capture_thought writes content to the cloud memory service — an external
+    # channel — so the ceiling is external_write. Read capabilities stay well
+    # under it; the write capability is policy-gated + confirmation-flagged.
+    risk_ceiling: external_write
     default_env_scope: [dev, prod_safe]
     tags: [memory, search, notes, semantic]
 
@@ -47,6 +48,23 @@ servers:
     risk_ceiling: read_only
     default_env_scope: [dev, test, prod_safe]
     tags: [issues, tasks, tracker]
+
+  # Phase 3 — read/write split. The same Beads tracker, separate server entry so
+  # write capabilities (create/update/close) carry a local_write ceiling and are
+  # policy-gated independently of the read-only surface above. Onboard the live
+  # endpoint per host in the gitignored overlay, not here.
+  beads_operator:
+    display_name: Beads (operator / read-write)
+    transport: streamable_http
+    endpoint_env: JANUS_BEADS_OP_URL
+    auth:
+      type: bearer
+      secret_env: JANUS_BEADS_OP_TOKEN
+    lifecycle: always_on
+    trust_level: first_party
+    risk_ceiling: local_write
+    default_env_scope: [dev, test, prod_safe]
+    tags: [issues, tasks, tracker, write]
 
   paperclip:
     display_name: Paperclip

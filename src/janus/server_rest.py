@@ -25,7 +25,9 @@ from pydantic import BaseModel, Field
 
 from janus.audit.types import AuditSink
 from janus.broker import Broker
+from janus.discovery.alerts import Alerter
 from janus.downstream.client_manager import DownstreamClientManager
+from janus.policy.trifecta import TrifectaGuard
 from janus.policy.types import PolicyEngine
 from janus.registry.registry import EnvScope, Registry
 from janus.registry.schema_store import CapabilityStateProvider
@@ -50,6 +52,10 @@ class BrokerDeps:
     audit: AuditSink
     sanitizer: ResultSanitizer | None = None
     state: CapabilityStateProvider | None = None
+    # Phase 3: shared across every per-request broker so a session's accumulated
+    # trifecta legs persist between its calls; the alerter pings trifecta denials.
+    trifecta: TrifectaGuard | None = None
+    alerter: Alerter | None = None
     default_env: EnvScope = EnvScope.PROD_SAFE
 
     def broker_for(self, identity: HostIdentity) -> Broker:
@@ -60,6 +66,8 @@ class BrokerDeps:
             self.audit,
             sanitizer=self.sanitizer,
             state=self.state,
+            trifecta=self.trifecta,
+            alerter=self.alerter,
             session_id=identity.label,
             profile=identity.profile,
             attended=identity.attended,
