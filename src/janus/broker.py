@@ -422,6 +422,7 @@ class Broker:
                     "capability_count": len(
                         self._registry.capabilities_for_server(sid)
                     ),
+                    "lifecycle_state": status.lifecycle_state,
                     "error": status.error,
                 }
             )

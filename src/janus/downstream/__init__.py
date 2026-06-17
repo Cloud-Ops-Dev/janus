@@ -11,8 +11,16 @@ from janus.downstream.client_manager import (
     HealthStatus,
     ToolInfo,
 )
+from janus.downstream.lifecycle import (
+    BreakerState,
+    CircuitBreaker,
+    LifecycleState,
+    ServerLifecycle,
+)
 
 __all__ = [
+    "BreakerState",
+    "CircuitBreaker",
     "ConnectionResolver",
     "DownstreamCallError",
     "DownstreamClientManager",
@@ -21,5 +29,7 @@ __all__ = [
     "DownstreamResult",
     "EnvConnectionResolver",
     "HealthStatus",
+    "LifecycleState",
+    "ServerLifecycle",
     "ToolInfo",
 ]

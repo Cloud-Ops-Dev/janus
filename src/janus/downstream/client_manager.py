@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -30,6 +31,13 @@ from mcp.client.session_group import (
 )
 from mcp.types import CallToolResult, Implementation, TextContent, Tool
 
+from janus.downstream.lifecycle import (
+    BreakerState,
+    CircuitBreaker,
+    Clock,
+    LifecycleState,
+    ServerLifecycle,
+)
 from janus.registry.registry import AuthType, Lifecycle, Server, Transport
 
 logger = logging.getLogger(__name__)
@@ -140,6 +148,7 @@ class HealthStatus:
     connected: bool
     tool_count: int | None
     error: str | None
+    lifecycle_state: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -164,6 +173,10 @@ class DownstreamClientManager:
         max_retries: int = 2,
         connect_retries: int = 4,
         connect_retry_delay: float = 3.0,
+        idle_after: float = 0.0,
+        breaker_threshold: int = 3,
+        breaker_cooldown: float = 30.0,
+        clock: Clock | None = None,
     ) -> None:
         self._servers = servers
         self._resolver: ConnectionResolver = resolver or EnvConnectionResolver()
@@ -181,6 +194,20 @@ class DownstreamClientManager:
         # Set transiently around each connect so the namespacing hook can tag
         # components with our registry server id (connects are sequential).
         self._connecting_server_id: str | None = None
+        # Phase 4 — lazy lifecycle + circuit breaker. idle_after=0 disables idle
+        # reaping (every server then behaves as before). The breaker still guards
+        # connects/calls regardless. Clock is monotonic + injectable for tests.
+        self._idle_after = idle_after
+        self._clock: Clock = clock or time.monotonic
+        self._lifecycle: dict[str, ServerLifecycle] = {
+            sid: ServerLifecycle(
+                breaker=CircuitBreaker(
+                    failure_threshold=breaker_threshold,
+                    cooldown_seconds=breaker_cooldown,
+                )
+            )
+            for sid in servers
+        }
 
     # -- lifecycle ---------------------------------------------------------- #
     async def __aenter__(self) -> DownstreamClientManager:
@@ -318,6 +345,10 @@ class DownstreamClientManager:
             try:
                 await self._connect_server_with_retry(server_id)
                 connected.append(server_id)
+                lc = self._lifecycle[server_id]
+                lc.state = LifecycleState.ACTIVE
+                lc.note_used(self._clock())
+                lc.breaker.record_success()
             except Exception as exc:  # noqa: BLE001 — tolerate any single downstream
                 self._connect_failures[server_id] = str(exc)
                 logger.warning(
@@ -336,13 +367,95 @@ class DownstreamClientManager:
             )
         return connected
 
+    # -- lazy lifecycle + circuit breaker (Phase 4) ------------------------- #
+    async def ensure_ready(self, server_id: str) -> None:
+        """Make a server ready to call, connecting LAZY ones on demand.
+
+        Always-on servers are owned by ``connect_all`` — if one is not connected
+        that is a real fault, so this leaves it untouched (the caller then raises
+        ``DownstreamNotConnected``). LAZY servers connect on first use, gated by
+        the circuit breaker: an OPEN breaker fails fast (``DEGRADED``) until the
+        cooldown elapses, then one half-open trial decides recovery.
+        """
+        server = self._servers.get(server_id)
+        if server is None:
+            raise DownstreamError(f"unknown server '{server_id}'")
+        lc = self._lifecycle[server_id]
+        if server_id in self._sessions:
+            lc.note_used(self._clock())
+            return
+        if server.lifecycle is not Lifecycle.LAZY:
+            return  # always-on, not connected -> caller raises NotConnected
+        now = self._clock()
+        if not lc.breaker.allow(now):
+            lc.state = LifecycleState.DEGRADED
+            raise DownstreamError(
+                f"server '{server_id}' is degraded (circuit breaker open) — failing fast"
+            )
+        lc.state = LifecycleState.WARMING
+        try:
+            await self.connect_server(server_id)
+        except Exception as exc:  # noqa: BLE001 — any connect failure trips the breaker
+            lc.breaker.record_failure(self._clock())
+            lc.state = (
+                LifecycleState.DEGRADED
+                if lc.breaker.state is not BreakerState.CLOSED
+                else LifecycleState.COLD
+            )
+            raise DownstreamError(f"server '{server_id}' connect failed: {exc}") from exc
+        lc.breaker.record_success()
+        lc.state = LifecycleState.ACTIVE
+        lc.note_used(self._clock())
+
+    async def disconnect_server(self, server_id: str) -> None:
+        """Tear down one server's session (idle shutdown). Safe if not connected."""
+        session = self._sessions.pop(server_id, None)
+        if session is None or self._group is None:
+            return
+        try:
+            await self._group.disconnect_from_server(session)
+        except Exception as exc:  # noqa: BLE001 — never let a teardown error escape
+            logger.warning("disconnect '%s' failed: %s", server_id, exc)
+
+    async def reap_idle(self, now: float | None = None) -> list[str]:
+        """Shut down LAZY servers idle past ``idle_after``; always-on are kept up."""
+        if self._idle_after <= 0:
+            return []
+        stamp = now if now is not None else self._clock()
+        reaped: list[str] = []
+        for sid, server in list(self._servers.items()):
+            if server.lifecycle is not Lifecycle.LAZY or sid not in self._sessions:
+                continue
+            lc = self._lifecycle[sid]
+            if lc.is_idle(self._idle_after, stamp):
+                await self.disconnect_server(sid)
+                lc.state = LifecycleState.COLD
+                reaped.append(sid)
+        if reaped:
+            logger.info("reaped idle lazy downstream(s): %s", ", ".join(reaped))
+        return reaped
+
+    async def run_idle_reaper(self, *, interval: float) -> None:
+        """Background loop: reap idle lazy downstreams every ``interval`` seconds."""
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.reap_idle()
+            except Exception as exc:  # noqa: BLE001 — the reaper must never crash serving
+                logger.warning("idle reaper error: %s", exc)
+
+    def lifecycle_state(self, server_id: str) -> LifecycleState:
+        return self._lifecycle[server_id].state
+
     # -- calling ------------------------------------------------------------ #
     async def call(
         self, server_id: str, tool: str, arguments: dict[str, Any] | None = None
     ) -> DownstreamResult:
+        await self.ensure_ready(server_id)
         session = self._sessions.get(server_id)
         if session is None:
             raise DownstreamNotConnected(server_id)
+        lc = self._lifecycle[server_id]
         last_exc: BaseException | None = None
         for _attempt in range(self._max_retries + 1):
             try:
@@ -350,17 +463,27 @@ class DownstreamClientManager:
                     session.call_tool(tool, arguments or {}),
                     timeout=self._call_timeout,
                 )
+                lc.breaker.record_success()
+                lc.note_used(self._clock())
                 return DownstreamResult.from_call_result(result)
             except (TimeoutError, ConnectionError) as exc:
                 last_exc = exc  # transient — retry
             except Exception as exc:  # noqa: BLE001 — wrap any downstream error
+                self._note_call_failure(lc)
                 raise DownstreamCallError(server_id, tool, exc) from exc
         # Retries exhausted on transient errors; last_exc is always set here.
+        self._note_call_failure(lc)
         raise DownstreamCallError(
             server_id, tool, last_exc or RuntimeError("call failed")
         )
 
+    def _note_call_failure(self, lc: ServerLifecycle) -> None:
+        lc.breaker.record_failure(self._clock())
+        if lc.breaker.state is not BreakerState.CLOSED:
+            lc.state = LifecycleState.DEGRADED
+
     async def list_tools(self, server_id: str) -> list[ToolInfo]:
+        await self.ensure_ready(server_id)
         session = self._sessions.get(server_id)
         if session is None:
             raise DownstreamNotConnected(server_id)
@@ -377,18 +500,24 @@ class DownstreamClientManager:
 
     # -- health ------------------------------------------------------------- #
     async def health(self, server_id: str | None = None) -> dict[str, HealthStatus]:
+        # Passive probe: reports connected servers + lifecycle state, but never
+        # lazily connects a cold server nor resets its idle clock.
         ids = [server_id] if server_id is not None else list(self._sessions)
         out: dict[str, HealthStatus] = {}
         for sid in ids:
-            if sid not in self._sessions:
+            lc = self._lifecycle.get(sid)
+            label = str(lc.state) if lc is not None else None
+            session = self._sessions.get(sid)
+            if session is None:
                 out[sid] = HealthStatus(sid, connected=False, tool_count=None,
-                                        error="not connected")
+                                        error="not connected", lifecycle_state=label)
                 continue
             try:
-                tools = await self.list_tools(sid)
-                out[sid] = HealthStatus(sid, connected=True, tool_count=len(tools),
-                                        error=None)
+                result = await session.list_tools()
+                out[sid] = HealthStatus(sid, connected=True,
+                                        tool_count=len(result.tools),
+                                        error=None, lifecycle_state=label)
             except Exception as exc:  # noqa: BLE001 — health must never raise
                 out[sid] = HealthStatus(sid, connected=False, tool_count=None,
-                                        error=str(exc))
+                                        error=str(exc), lifecycle_state=label)
         return out

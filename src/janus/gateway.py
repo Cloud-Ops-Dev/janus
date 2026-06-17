@@ -14,9 +14,10 @@ depends on an interactive shell.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -55,6 +56,10 @@ class GatewayConfig:
     op_path: str = "op"
     mcp_session: str = "mcp"
     mcp_profile: str = "default_assistant"
+    # Phase 4 — lazy lifecycle. idle_after_seconds=0 disables idle reaping (every
+    # server stays as before); >0 shuts down LAZY servers idle past the timeout.
+    idle_after_seconds: float = 0.0
+    reaper_interval_seconds: float = 60.0
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> GatewayConfig:
@@ -69,6 +74,8 @@ class GatewayConfig:
             op_path=env.get("JANUS_OP_PATH", "op"),
             mcp_session=env.get("JANUS_MCP_SESSION", "mcp"),
             mcp_profile=env.get("JANUS_MCP_PROFILE", "default_assistant"),
+            idle_after_seconds=float(env.get("JANUS_IDLE_AFTER_SECONDS", "0")),
+            reaper_interval_seconds=float(env.get("JANUS_REAPER_INTERVAL_SECONDS", "60")),
         )
 
 
@@ -144,7 +151,9 @@ class Gateway:
             load_profiles(profiles_path) if profiles_path.exists() else None
         )
         credential = CredentialBroker(env, op_path=config.op_path)
-        manager = DownstreamClientManager(registry.servers, credential)
+        manager = DownstreamClientManager(
+            registry.servers, credential, idle_after=config.idle_after_seconds
+        )
         audit = SqliteAuditLog(config.data_dir / "janus.db")
         # The store is the runtime authority for approval/quarantine (Phase 2).
         # Mirror the YAML registry into it; re-sync preserves runtime lifecycle.
@@ -216,9 +225,20 @@ async def serve_rest(config: GatewayConfig) -> None:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await gateway.connect()
+        reaper: asyncio.Task[None] | None = None
+        if config.idle_after_seconds > 0:
+            reaper = asyncio.create_task(
+                gateway.manager.run_idle_reaper(
+                    interval=config.reaper_interval_seconds
+                )
+            )
         try:
             yield
         finally:
+            if reaper is not None:
+                reaper.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reaper
             await gateway.aclose()
 
     app = gateway.rest_app(lifespan=lifespan)
