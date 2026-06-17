@@ -162,6 +162,16 @@ class Server(BaseModel):
     command_env: str | None = None
     args: list[str] = Field(default_factory=list)
 
+    # stdio env-injection (infra-b7g) — pass environment into the child so a
+    # downstream MCP can run without a bespoke wrapper. ``env`` is a static map
+    # (host-specific paths/ids; gitignored overlay only, never the public seed).
+    # ``env_passthrough`` names env vars copied from Janus's own process env at
+    # connect time (public-repo-safe: only NAMES are committed). The MCP stdio
+    # client otherwise inherits only HOME/PATH/USER/... so secrets like the op
+    # token never reach the child unless passed through here.
+    env: dict[str, str] = Field(default_factory=dict)
+    env_passthrough: list[str] = Field(default_factory=list)
+
     auth: ServerAuth = Field(default_factory=ServerAuth)
     lifecycle: Lifecycle = Lifecycle.ALWAYS_ON
     trust_level: TrustLevel = TrustLevel.FIRST_PARTY
@@ -191,6 +201,11 @@ class Server(BaseModel):
                 raise ValueError(
                     f"server '{self.id}': {self.transport.value} transport "
                     "must not set command/command_env/args"
+                )
+            if self.env or self.env_passthrough:
+                raise ValueError(
+                    f"server '{self.id}': {self.transport.value} transport "
+                    "must not set env/env_passthrough (stdio only)"
                 )
         return self
 

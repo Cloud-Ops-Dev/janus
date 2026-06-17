@@ -27,7 +27,11 @@ EnvironmentFile=-%h/.config/systemd/user/op-creds.env
 EnvironmentFile=-%h/.config/systemd/user/janus.env
 ExecStartPre=%h/IDE/projects/janus/.venv/bin/python -m janus --check
 ExecStart=%h/IDE/projects/janus/.venv/bin/python -m janus --serve
-Restart=on-failure
+# Restart=always (not on-failure): uvicorn exits status=0 even on a fatal
+# 'Application startup failed', so on-failure would NOT self-heal a transient
+# startup error (e.g. a boot-time DNS race before a downstream is reachable).
+# always + RestartSec makes systemd retry until the dependency is up (infra-b7g).
+Restart=always
 RestartSec=5
 
 [Install]

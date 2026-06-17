@@ -234,3 +234,46 @@ def test_build_auth_headers_missing_extra_header_is_fatal() -> None:
     mgr = DownstreamClientManager({}, resolver)
     with pytest.raises(DownstreamError, match="x-brain-key"):
         mgr._build_auth_headers(_http_server_with_extra_headers())
+
+
+# --------------------------------------------------------------------------- #
+# stdio env-injection (infra-b7g)
+# --------------------------------------------------------------------------- #
+def _stdio_env_server() -> Server:
+    return Server(
+        id="bd",
+        display_name="Beads",
+        transport=Transport.STDIO,
+        command="bd",
+        env={"BEADS_ACTOR": "janus"},
+        env_passthrough=["PASSTHRU_VAR"],
+        default_env_scope=[EnvScope.DEV],
+    )
+
+
+def test_build_child_env_injects_passthrough_and_static() -> None:
+    resolver = EnvConnectionResolver({"PASSTHRU_VAR": "passed-through"})
+    mgr = DownstreamClientManager({"bd": _stdio_env_server()}, resolver)
+    env = mgr._build_child_env(_stdio_env_server())
+    assert env is not None
+    assert env["PASSTHRU_VAR"] == "passed-through"  # copied from Janus env
+    assert env["BEADS_ACTOR"] == "janus"            # static literal
+    assert "PATH" in env                            # SDK default set preserved
+
+
+def test_build_child_env_none_when_not_declared() -> None:
+    server = Server(
+        id="x", display_name="X", transport=Transport.STDIO, command="x",
+        default_env_scope=[EnvScope.DEV],
+    )
+    mgr = DownstreamClientManager({"x": server})
+    assert mgr._build_child_env(server) is None
+
+
+def test_build_params_stdio_carries_injected_env() -> None:
+    resolver = EnvConnectionResolver({"PASSTHRU_VAR": "v"})
+    mgr = DownstreamClientManager({"bd": _stdio_env_server()}, resolver)
+    params = mgr._build_params(_stdio_env_server())
+    assert params.env is not None
+    assert params.env["BEADS_ACTOR"] == "janus"
+    assert params.env["PASSTHRU_VAR"] == "v"

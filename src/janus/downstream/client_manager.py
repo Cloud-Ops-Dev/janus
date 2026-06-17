@@ -29,6 +29,7 @@ from mcp.client.session_group import (
     SseServerParameters,
     StreamableHttpParameters,
 )
+from mcp.client.stdio import get_default_environment
 from mcp.types import CallToolResult, Implementation, TextContent, Tool
 
 from janus.downstream.lifecycle import (
@@ -247,7 +248,11 @@ class DownstreamClientManager:
                 raise DownstreamError(
                     f"server '{server.id}': no command (check command/command_env)"
                 )
-            return StdioServerParameters(command=command, args=list(server.args))
+            return StdioServerParameters(
+                command=command,
+                args=list(server.args),
+                env=self._build_child_env(server),
+            )
 
         url = self._resolver.resolve_endpoint(server)
         if not url:
@@ -259,6 +264,26 @@ class DownstreamClientManager:
             return SseServerParameters(url=url, headers=headers)
         # HTTP and STREAMABLE_HTTP both use the streamable-HTTP client.
         return StreamableHttpParameters(url=url, headers=headers)
+
+    def _build_child_env(self, server: Server) -> dict[str, str] | None:
+        """Environment for a stdio child (infra-b7g env-injection).
+
+        ``None`` (the default when nothing is declared) lets the SDK inherit only
+        its safe default set. When ``env``/``env_passthrough`` is declared we
+        start from that same default set so the child keeps HOME/PATH, then layer
+        passed-through process env vars (resolved + redaction-registered) and
+        finally the static map. This lets a downstream run without a bespoke
+        wrapper that re-exports the op token / mise PATH / BEADS_* itself.
+        """
+        if not (server.env or server.env_passthrough):
+            return None
+        child = get_default_environment()
+        for name in server.env_passthrough:
+            value = self._resolver.resolve_header_secret(name)
+            if value is not None:
+                child[name] = value
+        child.update(server.env)
+        return child
 
     def _build_auth_headers(self, server: Server) -> dict[str, str] | None:
         headers: dict[str, str] = {}

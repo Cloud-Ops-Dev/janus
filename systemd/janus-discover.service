@@ -1,0 +1,21 @@
+# Janus descriptor-drift discovery scan (infra-b7g) — systemd --user oneshot.
+#
+# Crawls every downstream, refreshes observed descriptors, and auto-quarantines
+# any approved capability whose schema/description drifted (Phase 2 DriftMonitor),
+# alerting via JANUS_DISCORD_WEBHOOK_URL. Runs on a timer (janus-discover.timer)
+# until Phase 4 folds periodic discovery into the service loop. Reads the same
+# registry cache the live gateway reads, so a quarantine takes effect with no
+# gateway restart. Same EnvironmentFiles as janus.service so the stdio downstream
+# wrappers get the op token / PATH (self-sufficiency, constitution §12).
+
+[Unit]
+Description=Janus descriptor-drift discovery scan
+After=janus.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/IDE/projects/janus
+EnvironmentFile=-%h/.config/systemd/user/op-creds.env
+EnvironmentFile=-%h/.config/systemd/user/janus.env
+ExecStart=%h/IDE/projects/janus/bin/janus-admin discover

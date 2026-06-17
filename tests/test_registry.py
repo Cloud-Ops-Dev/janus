@@ -241,6 +241,39 @@ servers:
         load_registry(cfg)
 
 
+def test_stdio_env_injection_loads(tmp_path: Path) -> None:
+    servers = """
+servers:
+  bd:
+    display_name: Beads
+    transport: stdio
+    command: bd
+    env_passthrough: [OP_SERVICE_ACCOUNT_TOKEN, PATH]
+    env:
+      BEADS_ACTOR: janus
+    default_env_scope: [dev]
+"""
+    cfg = _write_config(tmp_path, servers, "capabilities: {}")
+    server = load_registry(cfg).servers["bd"]
+    assert server.env == {"BEADS_ACTOR": "janus"}
+    assert server.env_passthrough == ["OP_SERVICE_ACCOUNT_TOKEN", "PATH"]
+
+
+def test_http_transport_rejects_env_injection(tmp_path: Path) -> None:
+    servers = """
+servers:
+  ob:
+    display_name: OB
+    transport: streamable_http
+    endpoint_env: OB_URL
+    env: {X: "y"}
+    default_env_scope: [dev]
+"""
+    cfg = _write_config(tmp_path, servers, "capabilities: {}")
+    with pytest.raises(RegistryError, match="must not set env"):
+        load_registry(cfg)
+
+
 def test_missing_file_rejected(tmp_path: Path) -> None:
     with pytest.raises(RegistryError, match="not found"):
         load_registry(tmp_path)

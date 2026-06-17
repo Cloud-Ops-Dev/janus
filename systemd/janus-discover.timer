@@ -1,0 +1,19 @@
+# Janus drift-scan timer (infra-b7g) — runs janus-discover.service periodically.
+#
+# Install (operator, break-glass):
+#   cp systemd/janus-discover.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now janus-discover.timer
+
+[Unit]
+Description=Periodic Janus descriptor-drift discovery scan
+
+[Timer]
+# First scan shortly after boot (once the gateway + downstreams settle), then
+# every 6 hours. Persistent catches up a scan missed while powered off.
+OnBootSec=10min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
