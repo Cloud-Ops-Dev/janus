@@ -120,7 +120,7 @@ capabilities:
     approved: true
     tags: [memory, write, unarchive]
 
-  # --- Open Brain — documents (the Notion-replacement wiki) ----------------- #
+  # --- Open Brain — documents (OpenBrain Docs human-readable wiki) ---------- #
   # create/update carry a markdown body to the cloud (external_write, flagged
   # requires_confirmation here); reads are read_only; archive/unarchive are
   # id-only state flips (local_write).

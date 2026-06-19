@@ -1,6 +1,6 @@
 ---
 owner: Clayton
-last_reviewed: 2026-06-16
+last_reviewed: 2026-06-19
 source_of_truth_for: Janus MCP gateway operating contract for agents — extends IDE constitution
 supersedes: null
 ---
@@ -17,7 +17,7 @@ Inherits the IDE constitution (`~/IDE/CLAUDE.md` / `~/IDE/AGENTS.md`). The const
 
 Janus is an MCP gateway / capability broker: agents load one small, stable tool surface (`capability.search` / `describe` / `call`, `server.list` / `health`, `policy.explain`, `audit.recent`) instead of every downstream MCP server. It owns a capability registry, a deny-by-default policy engine (risk tiers + env gates), a credential broker, a result sanitizer, descriptor/schema drift detection, and an audit log. Dual interface: MCP (capable hosts) + REST/CLI (fallback).
 
-Design + phased plan: tracked in Open Brain (`c455fed9`, `38cd4933`), the internal Notion *Master MCP Design* / *Implementation Plan* pages, and the build epic **infra-22q** in beads.
+Design + phased plan: tracked in Open Brain semantic memory (`c455fed9`, `38cd4933`), OpenBrain Docs (`infrastructure-tooling-agent-tooling-claude-master-mcp-design-and-plan-master-mcp-design`, `infrastructure-tooling-agent-tooling-claude-master-mcp-design-and-plan-master-mcp-implementation-plan`), and the build epic **infra-22q** in beads.
 
 ## Governance
 

@@ -67,7 +67,7 @@ def test_capabilities_for_server() -> None:
         "unpin_thought",
         "archive_thought",
         "unarchive_thought",
-        # documents (the Notion-replacement wiki)
+        # OpenBrain Docs document-table capabilities
         "search_documents",
         "get_document",
         "list_documents",
