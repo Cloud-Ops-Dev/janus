@@ -19,7 +19,14 @@ from janus.downstream import (
     DownstreamNotConnected,
     EnvConnectionResolver,
 )
-from janus.registry import AuthType, EnvScope, Server, ServerAuth, Transport
+from janus.registry import (
+    AuthType,
+    EnvScope,
+    Lifecycle,
+    Server,
+    ServerAuth,
+    Transport,
+)
 
 FAKE = str(Path(__file__).parent / "_fake_downstream.py")
 
@@ -277,3 +284,49 @@ def test_build_params_stdio_carries_injected_env() -> None:
     assert params.env is not None
     assert params.env["BEADS_ACTOR"] == "janus"
     assert params.env["PASSTHRU_VAR"] == "v"
+
+
+# --------------------------------------------------------------------------- #
+# Lazy stdio connect-on-demand across tasks (infra-yvs.1.12 regression)
+# --------------------------------------------------------------------------- #
+def _lazy_stdio_server(server_id: str) -> Server:
+    return Server(
+        id=server_id,
+        display_name=f"Lazy {server_id}",
+        transport=Transport.STDIO,
+        command=sys.executable,
+        args=[FAKE],
+        lifecycle=Lifecycle.LAZY,
+        default_env_scope=[EnvScope.DEV],
+    )
+
+
+def test_lazy_stdio_connects_on_demand_and_tears_down_across_tasks() -> None:
+    """Regression for the lazy-lifecycle hang (infra-yvs.1.12).
+
+    A lazy stdio downstream is connected on demand from a SEPARATE task (the
+    per-call task in production) and disconnected from yet another, then the
+    manager context exits. Before the owner-task fix, the stdio child's anyio
+    cancel scope was entered in the per-call task and exited during teardown in a
+    different task -> "Attempted to exit cancel scope in a different task" + hang.
+    Now all group ops run in the single owner task, so this completes cleanly.
+    """
+
+    async def body() -> None:
+        mgr = DownstreamClientManager({"lazy": _lazy_stdio_server("lazy")})
+        async with mgr:
+            # Lazy server is NOT connected at startup (only_always_on default).
+            assert await mgr.connect_all() == []
+            assert mgr.connected_servers == []
+
+            # Connect on demand from a DISTINCT task (the cross-task trigger).
+            result = await asyncio.create_task(mgr.call("lazy", "echo", {"text": "hi"}))
+            assert "hi" in result.text
+            assert mgr.connected_servers == ["lazy"]
+
+            # Disconnect from yet another task — must not raise or hang.
+            await asyncio.create_task(mgr.disconnect_server("lazy"))
+            assert mgr.connected_servers == []
+        # Context exit (worker teardown) must complete cleanly.
+
+    asyncio.run(asyncio.wait_for(body(), timeout=30))

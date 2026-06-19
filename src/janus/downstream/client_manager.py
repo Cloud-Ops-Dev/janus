@@ -152,6 +152,22 @@ class HealthStatus:
     lifecycle_state: str | None = None
 
 
+@dataclass
+class _ConnRequest:
+    """A connect/disconnect request handed to the connection-owner task.
+
+    ``op`` is ``"connect"`` or ``"disconnect"``. ``future`` is resolved (or
+    failed) by the owner task once the operation completes, so the submitting
+    task awaits a normal result while the actual group mutation happens in the
+    single owner task (infra-yvs.1.12).
+    """
+
+    op: str
+    server_id: str
+    params: StdioServerParameters | StreamableHttpParameters | SseServerParameters | None
+    future: asyncio.Future[None]
+
+
 # --------------------------------------------------------------------------- #
 # Manager
 # --------------------------------------------------------------------------- #
@@ -188,8 +204,19 @@ class DownstreamClientManager:
         self._connect_retries = connect_retries
         self._connect_retry_delay = connect_retry_delay
         self._sessions: dict[str, ClientSession] = {}
-        self._stack: AsyncExitStack | None = None
         self._group: ClientSessionGroup | None = None
+        # Single owner task for the ClientSessionGroup (infra-yvs.1.12). EVERY
+        # connect/disconnect/close runs inside this task so each stdio child's
+        # anyio cancel scope is entered AND exited in the same task — the fix for
+        # the lazy connect-on-demand hang (a lazy connect ran in the per-call task
+        # while the group teardown ran in another, tripping anyio's "exit cancel
+        # scope in a different task"). Requests are submitted over a queue; tool
+        # CALLS still use the session directly from any task (stream I/O is safe).
+        self._worker_task: asyncio.Task[None] | None = None
+        self._request_queue: asyncio.Queue[_ConnRequest | None] | None = None
+        self._worker_ready: asyncio.Event | None = None
+        self._worker_stop: asyncio.Event | None = None
+        self._worker_error: BaseException | None = None
         # Server ids that failed to connect on the last connect_all (id -> error).
         self._connect_failures: dict[str, str] = {}
         # Set transiently around each connect so the namespacing hook can tag
@@ -212,18 +239,107 @@ class DownstreamClientManager:
 
     # -- lifecycle ---------------------------------------------------------- #
     async def __aenter__(self) -> DownstreamClientManager:
-        self._stack = AsyncExitStack()
-        self._group = await self._stack.enter_async_context(
-            ClientSessionGroup(component_name_hook=self._component_name_hook)
+        queue: asyncio.Queue[_ConnRequest | None] = asyncio.Queue()
+        ready = asyncio.Event()
+        stop = asyncio.Event()
+        self._request_queue = queue
+        self._worker_ready = ready
+        self._worker_stop = stop
+        self._worker_error = None
+        self._worker_task = asyncio.create_task(
+            self._connection_worker(queue, ready)
         )
+        await ready.wait()
+        if self._worker_error is not None:
+            err = self._worker_error
+            await self._shutdown_worker()
+            raise DownstreamError(f"connection worker failed to start: {err}")
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        if self._stack is not None:
-            await self._stack.aclose()
-        self._stack = None
-        self._group = None
+        await self._shutdown_worker()
         self._sessions.clear()
+
+    async def _connection_worker(
+        self, queue: asyncio.Queue[_ConnRequest | None], ready: asyncio.Event
+    ) -> None:
+        """Own the ClientSessionGroup for the manager's whole lifetime.
+
+        Connect/disconnect/close ALL happen here (infra-yvs.1.12), so a downstream
+        opened on demand by a per-call task is torn down in this same task — never
+        the cross-task cancel-scope teardown that hung lazy stdio connects.
+        """
+        try:
+            async with AsyncExitStack() as stack:
+                self._group = await stack.enter_async_context(
+                    ClientSessionGroup(component_name_hook=self._component_name_hook)
+                )
+                ready.set()
+                while True:
+                    req = await queue.get()
+                    if req is None:  # stop sentinel
+                        break
+                    await self._handle_request(req)
+            # The group + every connection close HERE, inside this task.
+        except Exception as exc:  # noqa: BLE001 — group failed to start; report it
+            self._worker_error = exc
+            if not ready.is_set():
+                ready.set()
+        finally:
+            self._group = None
+
+    async def _handle_request(self, req: _ConnRequest) -> None:
+        try:
+            if req.op == "connect":
+                if req.server_id in self._sessions:  # idempotent
+                    req.future.set_result(None)
+                    return
+                if self._group is None or req.params is None:
+                    raise DownstreamError("connect request without an open group")
+                self._connecting_server_id = req.server_id
+                try:
+                    session = await self._group.connect_to_server(req.params)
+                finally:
+                    self._connecting_server_id = None
+                self._sessions[req.server_id] = session
+            elif req.op == "disconnect" and req.server_id in self._sessions:
+                session = self._sessions.pop(req.server_id)
+                if self._group is not None:
+                    await self._group.disconnect_from_server(session)
+            if not req.future.done():
+                req.future.set_result(None)
+        except Exception as exc:  # noqa: BLE001 — surface to the submitting task
+            if not req.future.done():
+                req.future.set_exception(exc)
+
+    async def _submit(
+        self,
+        op: str,
+        server_id: str,
+        params: StdioServerParameters
+        | StreamableHttpParameters
+        | SseServerParameters
+        | None = None,
+    ) -> None:
+        if self._request_queue is None or self._worker_task is None:
+            raise DownstreamError("manager not started (use 'async with')")
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        await self._request_queue.put(_ConnRequest(op, server_id, params, future))
+        await future
+
+    async def _shutdown_worker(self) -> None:
+        if self._worker_task is None:
+            return
+        if self._worker_stop is not None:
+            self._worker_stop.set()
+        if self._request_queue is not None:
+            await self._request_queue.put(None)  # wake the worker to exit
+        try:
+            await self._worker_task
+        finally:
+            self._worker_task = None
+            self._request_queue = None
+            self._group = None
 
     def _component_name_hook(self, name: str, server_info: Implementation) -> str:
         prefix = self._connecting_server_id or server_info.name
@@ -307,20 +423,17 @@ class DownstreamClientManager:
         return headers or None
 
     async def connect_server(self, server_id: str) -> None:
-        if self._group is None:
+        if self._worker_task is None:
             raise DownstreamError("manager not started (use 'async with')")
         if server_id in self._sessions:
             return
         server = self._servers.get(server_id)
         if server is None:
             raise DownstreamError(f"unknown server '{server_id}'")
+        # Build params in THIS task (so a missing command/secret raises to the
+        # caller synchronously); the actual connect runs in the owner task.
         params = self._build_params(server)
-        self._connecting_server_id = server_id
-        try:
-            session = await self._group.connect_to_server(params)
-        finally:
-            self._connecting_server_id = None
-        self._sessions[server_id] = session
+        await self._submit("connect", server_id, params)
 
     async def _connect_server_with_retry(self, server_id: str) -> None:
         """Connect one server, retrying transient failures with a fixed backoff.
@@ -433,12 +546,15 @@ class DownstreamClientManager:
         lc.note_used(self._clock())
 
     async def disconnect_server(self, server_id: str) -> None:
-        """Tear down one server's session (idle shutdown). Safe if not connected."""
-        session = self._sessions.pop(server_id, None)
-        if session is None or self._group is None:
+        """Tear down one server's session (idle shutdown). Safe if not connected.
+
+        Routed through the owner task so the stdio cancel scope is exited in the
+        same task it was entered in (infra-yvs.1.12).
+        """
+        if server_id not in self._sessions or self._worker_task is None:
             return
         try:
-            await self._group.disconnect_from_server(session)
+            await self._submit("disconnect", server_id)
         except Exception as exc:  # noqa: BLE001 — never let a teardown error escape
             logger.warning("disconnect '%s' failed: %s", server_id, exc)
 
