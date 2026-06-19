@@ -24,7 +24,7 @@ from janus.registry import (
     Server,
     Transport,
 )
-from janus.server_mcp import create_mcp_server
+from janus.server_mcp import build_mcp_server, create_mcp_server
 
 FAKE = str(Path(__file__).parent / "_fake_downstream.py")
 
@@ -143,3 +143,21 @@ def test_dynamic_exposure_off_hides_the_expose_tools() -> None:
     assert "capability_expose" not in names
     assert "capability_unexpose" not in names
     assert "capability_call" in names  # the universal fallback is always present
+
+
+def test_build_mcp_server_returns_exposer_handle() -> None:
+    mgr = DownstreamClientManager(_registry().servers)
+    # dynamic exposure on -> the serving layer gets a handle to auto-expose with.
+    _server, exposer = build_mcp_server(_broker(mgr))
+    assert exposer is not None
+    # off -> no handle (nothing to auto-expose through).
+    _server_off, none_exposer = build_mcp_server(_broker(mgr), dynamic_exposure=False)
+    assert none_exposer is None
+
+
+def test_create_mcp_server_shim_returns_plain_server() -> None:
+    mgr = DownstreamClientManager(_registry().servers)
+    server = create_mcp_server(_broker(mgr))
+    # back-compat: a bare FastMCP, not the (server, exposer) tuple.
+    assert not isinstance(server, tuple)
+    assert "capability_call" in {t.name for t in asyncio.run(server.list_tools())}

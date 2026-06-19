@@ -28,15 +28,21 @@ def _parse_risk(risk: str | None) -> RiskTier | None:
     return RiskTier(risk)
 
 
-def create_mcp_server(
+def build_mcp_server(
     broker: Broker, *, name: str = "janus", dynamic_exposure: bool = True
-) -> FastMCP:
-    """Build the Janus FastMCP server bound to a broker instance.
+) -> tuple[FastMCP, DynamicToolExposer | None]:
+    """Build the Janus FastMCP server **and** return its exposer handle.
 
     ``dynamic_exposure`` (Phase 6) adds ``capability_expose`` / ``capability_
     unexpose`` so clients that handle ``tools/list_changed`` can surface searched
     capabilities as native tools. It is purely additive — the core 7 tools and
     the universal ``capability_call`` fallback are unchanged.
+
+    The returned exposer (``None`` when ``dynamic_exposure`` is off) lets the
+    serving layer auto-expose a configured hot set at startup (``JANUS_AUTO_
+    EXPOSE``), so daily tools like ``open_brain.capture_thought`` stay native
+    after a client drops its direct MCP — without each session re-exposing them.
+    Use :func:`create_mcp_server` when the handle is not needed.
     """
     mcp: FastMCP = FastMCP(name)
     exposer = DynamicToolExposer(mcp, broker)
@@ -136,4 +142,17 @@ def create_mcp_server(
             is omitted)."""
             return exposer.unexpose(tool_names)
 
-    return mcp
+        return mcp, exposer
+
+    return mcp, None
+
+
+def create_mcp_server(
+    broker: Broker, *, name: str = "janus", dynamic_exposure: bool = True
+) -> FastMCP:
+    """Build the Janus FastMCP server, discarding the exposer handle.
+
+    Back-compat wrapper around :func:`build_mcp_server` for callers (and tests)
+    that don't need to auto-expose at startup.
+    """
+    return build_mcp_server(broker, name=name, dynamic_exposure=dynamic_exposure)[0]

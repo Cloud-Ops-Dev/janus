@@ -1,6 +1,6 @@
 # owner: Clayton
-# last_reviewed: 2026-06-18
-# source_of_truth_for: Janus brokered-capability registry — one entry per approved downstream tool (Phase-1 seed + Phase-3 writes)
+# last_reviewed: 2026-06-19
+# source_of_truth_for: Janus brokered-capability registry — one entry per approved downstream tool (Phase-1 seed + Phase-3 writes + full open_brain surface)
 # supersedes: null
 #
 # Janus capability registry — Phase 1 seed (read-only, first-party).
@@ -61,6 +61,140 @@ capabilities:
     approved: true
     requires_confirmation: true
     tags: [memory, write, capture]
+
+  # --- Open Brain — thought mutations (OB1 forgetting tools) ---------------- #
+  # update_thought is CONTENT-bearing (new body goes to the cloud memory service)
+  # so it carries external_write — the same EXTERNAL_COMM trifecta leg as capture
+  # — and is flagged requires_confirmation in this conservative seed. pin/unpin/
+  # archive/unarchive are id-only state flips (no content payload) -> local_write.
+  # A host overlay (clay_blade) may drop requires_confirmation to make these
+  # frictionless under a trusted profile, where the session guard is the control.
+  open_brain.update_thought:
+    server_id: open_brain
+    downstream_tool_name: update_thought
+    title: Update an Open Brain thought
+    summary: Revise an existing thought's content or metadata by id; creates a revision and can mark it superseded.
+    risk: external_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    requires_confirmation: true
+    tags: [memory, write, update]
+
+  open_brain.pin_thought:
+    server_id: open_brain
+    downstream_tool_name: pin_thought
+    title: Pin an Open Brain thought
+    summary: Exempt a thought from decay downranking and the stale digest (lock its weight).
+    risk: local_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [memory, write, pin]
+
+  open_brain.unpin_thought:
+    server_id: open_brain
+    downstream_tool_name: unpin_thought
+    title: Unpin an Open Brain thought
+    summary: Remove a thought's pin so it resumes normal decay.
+    risk: local_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [memory, write, unpin]
+
+  open_brain.archive_thought:
+    server_id: open_brain
+    downstream_tool_name: archive_thought
+    title: Archive an Open Brain thought
+    summary: Remove a thought from search results reversibly (the row is kept; unarchive restores it).
+    risk: local_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [memory, write, archive]
+
+  open_brain.unarchive_thought:
+    server_id: open_brain
+    downstream_tool_name: unarchive_thought
+    title: Unarchive an Open Brain thought
+    summary: Restore a previously archived thought to search results.
+    risk: local_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [memory, write, unarchive]
+
+  # --- Open Brain — documents (the Notion-replacement wiki) ----------------- #
+  # create/update carry a markdown body to the cloud (external_write, flagged
+  # requires_confirmation here); reads are read_only; archive/unarchive are
+  # id-only state flips (local_write).
+  open_brain.search_documents:
+    server_id: open_brain
+    downstream_tool_name: search_documents
+    title: Search Open Brain documents
+    summary: Semantic search over markdown documents in the OpenBrain wiki.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [documents, semantic-search]
+
+  open_brain.get_document:
+    server_id: open_brain
+    downstream_tool_name: get_document
+    title: Get an Open Brain document
+    summary: Fetch one document's markdown body and metadata by id or slug.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [documents, detail]
+
+  open_brain.list_documents:
+    server_id: open_brain
+    downstream_tool_name: list_documents
+    title: List Open Brain documents
+    summary: List documents, optionally filtered by folder or tag.
+    risk: read_only
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [documents, list]
+
+  open_brain.create_document:
+    server_id: open_brain
+    downstream_tool_name: create_document
+    title: Create an Open Brain document
+    summary: Create a durable markdown document in the OpenBrain wiki.
+    risk: external_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    requires_confirmation: true
+    tags: [documents, write, create]
+
+  open_brain.update_document:
+    server_id: open_brain
+    downstream_tool_name: update_document
+    title: Update an Open Brain document
+    summary: Revise a document's body or metadata by id or slug; saves a revision.
+    risk: external_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    requires_confirmation: true
+    tags: [documents, write, update]
+
+  open_brain.archive_document:
+    server_id: open_brain
+    downstream_tool_name: archive_document
+    title: Archive an Open Brain document
+    summary: Remove a document from listings and search, reversibly.
+    risk: local_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [documents, write, archive]
+
+  open_brain.unarchive_document:
+    server_id: open_brain
+    downstream_tool_name: unarchive_document
+    title: Unarchive an Open Brain document
+    summary: Restore a previously archived document.
+    risk: local_write
+    env_scope: [dev, prod_safe]
+    approved: true
+    tags: [documents, write, unarchive]
 
   # --- Beads (issue tracker) — read ----------------------------------------- #
   beads_readonly.list:

@@ -98,6 +98,16 @@ def test_check_environment_ok_for_stdio(tmp_path: Path) -> None:
     assert problems == []
 
 
+def test_auto_expose_config_parsing() -> None:
+    # comma-separated, whitespace-trimmed, empties dropped.
+    config = GatewayConfig.from_env(
+        {"JANUS_AUTO_EXPOSE": " open_brain.capture_thought , fake.add ,, "}
+    )
+    assert config.auto_expose == ("open_brain.capture_thought", "fake.add")
+    # default: nothing auto-exposed.
+    assert GatewayConfig.from_env({}).auto_expose == ()
+
+
 # --------------------------------------------------------------------------- #
 # Gateway build + connect
 # --------------------------------------------------------------------------- #
@@ -179,6 +189,47 @@ def test_end_to_end_stdio_phase1_acceptance(tmp_path: Path) -> None:
                      "reason": "e2e"},
                 )
             )
+            assert called["status"] == "ok"
+
+    asyncio.run(body())
+
+
+def test_end_to_end_stdio_auto_expose(tmp_path: Path) -> None:
+    """JANUS_AUTO_EXPOSE surfaces a native tool at startup, no client action.
+
+    This is the ergonomics half of the open_brain cutover (infra-rn6): after a
+    client drops its direct MCP, the configured hot capabilities must already be
+    native tools (real schema) on the first list_tools — not require each session
+    to call capability_expose. Verified through the real `--stdio` serve path.
+    """
+    cfg = _write_stdio_config(tmp_path)
+    env = {
+        **os.environ,
+        "JANUS_CONFIG_DIR": str(cfg),
+        "JANUS_DATA_DIR": str(tmp_path / "data"),
+        "JANUS_DEFAULT_ENV": "prod_safe",
+        "JANUS_MCP_PROFILE": "default_assistant",
+        "JANUS_TOKENS": "t=h:default_assistant",
+        "JANUS_AUTO_EXPOSE": "fake.add",
+    }
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "janus", "--stdio"], env=env
+    )
+
+    async def body() -> None:
+        async with ClientSessionGroup() as group:
+            session = await group.connect_to_server(params)
+
+            names = {t.name for t in (await session.list_tools()).tools}
+            # auto-exposed at startup — present without the client calling expose.
+            assert "cap__fake__add" in names
+
+            # and it carries the downstream's REAL schema, routed through the broker.
+            native = next(
+                t for t in (await session.list_tools()).tools if t.name == "cap__fake__add"
+            )
+            assert sorted(native.inputSchema["properties"]) == ["a", "b"]
+            called = _payload(await session.call_tool("cap__fake__add", {"a": 4, "b": 5}))
             assert called["status"] == "ok"
 
     asyncio.run(body())

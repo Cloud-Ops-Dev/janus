@@ -53,11 +53,28 @@ def test_seed_capabilities_reference_real_servers() -> None:
 def test_capabilities_for_server() -> None:
     registry = load_registry(SEED_CONFIG)
     ob = registry.capabilities_for_server("open_brain")
+    # The FULL Open Brain surface is brokered (infra-rn6) so a client can drop its
+    # direct open_brain MCP without losing any tool: 9 thought tools + 7 document
+    # tools. If a tool is added to the open_brain MCP, mirror it here + in the seed.
     assert {c.downstream_tool_name for c in ob} == {
+        # thoughts (semantic memory)
         "search_thoughts",
         "list_thoughts",
         "thought_stats",
         "capture_thought",
+        "update_thought",
+        "pin_thought",
+        "unpin_thought",
+        "archive_thought",
+        "unarchive_thought",
+        # documents (the Notion-replacement wiki)
+        "search_documents",
+        "get_document",
+        "list_documents",
+        "create_document",
+        "update_document",
+        "archive_document",
+        "unarchive_document",
     }
 
 
