@@ -6,12 +6,14 @@ broker through two front doors:
 | Surface | Invocation | For |
 |---|---|---|
 | MCP / stdio | `python -m janus --stdio` | Per-client spawn (Claude Code, Codex) |
-| MCP / HTTP | `python -m janus --mcp-http` | Networked MCP clients |
-| REST | `python -m janus --serve` | Hermes Desktop + `bin/janus` CLI |
+| MCP / HTTP | `python -m janus --serve` (`/mcp/`) | Authenticated networked MCP clients |
+| REST | `python -m janus --serve` (`/v1/`) | Hermes Desktop + `bin/janus` CLI |
+| MCP / HTTP only | `python -m janus --mcp-http` | Standalone networked MCP process |
 
-The agent-facing tool surface is exactly 7 tools: `capability_search`,
+The stable agent-facing surface is 7 broker tools: `capability_search`,
 `capability_describe`, `capability_call`, `server_list`, `server_health`,
-`policy_explain`, `audit_recent`.
+`policy_explain`, `audit_recent`, plus the optional dynamic-exposure controls
+`capability_expose` and `capability_unexpose`.
 
 ## Configure
 
@@ -55,6 +57,10 @@ shell, so it passes provided linger is enabled and the two env files exist.
   `~/IDE/projects/janus/.venv/bin/python -m janus --stdio` with the gateway env.
 - **Hermes Desktop / SSH:** use `bin/janus` (set `JANUS_URL` + `JANUS_TOKEN`),
   or POST to `/v1/capability/{search,describe,call}`.
+- **Networked MCP:** connect to `http://HOST:8088/mcp/` with one of the bearer
+  tokens mapped in `JANUS_TOKENS`. The token supplies the profile/audit identity;
+  `Mcp-Session-Id` isolates trifecta and exposed-tool state. Session state expires
+  after `JANUS_MCP_SESSION_TTL_SECONDS` (default `3600`).
 
 Cut over per host once a host answers read questions through Janus reliably;
 keep the direct MCP configs as documented break-glass.

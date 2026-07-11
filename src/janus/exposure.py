@@ -54,10 +54,19 @@ class DynamicToolExposer:
         self._broker = broker
         self._max = max_exposed
         self._exposed: dict[str, str] = {}  # tool_name -> capability_id
+        self._tools: dict[str, Tool] = {}
 
     @property
     def active(self) -> dict[str, str]:
         return dict(self._exposed)
+
+    @property
+    def tools(self) -> list[Tool]:
+        """Session-owned proxy tools, independent of provider internals."""
+        return list(self._tools.values())
+
+    def get_tool(self, name: str) -> Tool | None:
+        return self._tools.get(name)
 
     @staticmethod
     def tool_name(capability_id: str) -> str:
@@ -87,6 +96,7 @@ class DynamicToolExposer:
                 self._mcp.local_provider.remove_tool(name)  # refresh in place
             self._mcp.local_provider.add_tool(tool)
             self._exposed[name] = cid
+            self._tools[name] = tool
             exposed.append(name)
         return {"exposed": exposed, "skipped": skipped, "active": sorted(self._exposed)}
 
@@ -97,6 +107,7 @@ class DynamicToolExposer:
             if name in self._exposed:
                 self._mcp.local_provider.remove_tool(name)
                 del self._exposed[name]
+                self._tools.pop(name, None)
                 removed.append(name)
         return {"unexposed": removed, "active": sorted(self._exposed)}
 

@@ -136,3 +136,8 @@ class TrifectaGuard:
     def session_legs(self, session_id: str) -> frozenset[TrifectaLeg]:
         with self._lock:
             return frozenset(self._by_session.get(session_id, set()))
+
+    def clear_session(self, session_id: str) -> None:
+        """Discard accumulated legs when a network MCP session expires."""
+        with self._lock:
+            self._by_session.pop(session_id, None)

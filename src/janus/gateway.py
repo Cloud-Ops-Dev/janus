@@ -38,6 +38,7 @@ from janus.security.credential_broker import CredentialBroker
 from janus.security.output_sanitizer import OutputSanitizer
 from janus.server_mcp import build_mcp_server
 from janus.server_rest import BrokerDeps, HostIdentity, create_rest_app
+from janus.session_mcp import McpSessionPool, build_session_mcp_server
 
 DEFAULT_REST_PORT = 8088
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -69,6 +70,7 @@ class GatewayConfig:
     # (capability_call/capability_expose remain available). Policy still applies:
     # a capability the session may not call is silently skipped.
     auto_expose: tuple[str, ...] = ()
+    mcp_session_ttl_seconds: float = 3600.0
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> GatewayConfig:
@@ -79,6 +81,11 @@ class GatewayConfig:
             for item in env.get("JANUS_AUTO_EXPOSE", "").split(",")
             if item.strip()
         )
+        mcp_session_ttl_seconds = float(
+            env.get("JANUS_MCP_SESSION_TTL_SECONDS", "3600")
+        )
+        if mcp_session_ttl_seconds <= 0:
+            raise ValueError("JANUS_MCP_SESSION_TTL_SECONDS must be greater than zero")
         return cls(
             config_dir=Path(env.get("JANUS_CONFIG_DIR", str(root / "config"))),
             data_dir=Path(env.get("JANUS_DATA_DIR", str(root / "data"))),
@@ -91,6 +98,7 @@ class GatewayConfig:
             idle_after_seconds=float(env.get("JANUS_IDLE_AFTER_SECONDS", "0")),
             reaper_interval_seconds=float(env.get("JANUS_REAPER_INTERVAL_SECONDS", "60")),
             auto_expose=auto_expose,
+            mcp_session_ttl_seconds=mcp_session_ttl_seconds,
         )
 
 
@@ -220,6 +228,14 @@ class Gateway:
         )
         return build_mcp_server(self.deps.broker_for(identity))
 
+    def session_mcp_server(self) -> tuple[Any, McpSessionPool]:
+        return build_session_mcp_server(
+            self.deps,
+            self.tokens,
+            ttl_seconds=self.config.mcp_session_ttl_seconds,
+            auto_expose=self.config.auto_expose,
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Serving entrypoints
@@ -252,10 +268,12 @@ async def serve_stdio(config: GatewayConfig) -> None:
 
 
 async def serve_rest(config: GatewayConfig) -> None:
-    """Serve the REST API (always-on networked surface). Operator-deployed."""
+    """Serve REST plus authenticated MCP-over-HTTP in one gateway process."""
     import uvicorn
 
     gateway = Gateway.build(config)
+    mcp_server, _pool = gateway.session_mcp_server()
+    mcp_app = mcp_server.http_app(path="/", transport="http")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -267,16 +285,18 @@ async def serve_rest(config: GatewayConfig) -> None:
                     interval=config.reaper_interval_seconds
                 )
             )
-        try:
-            yield
-        finally:
-            if reaper is not None:
-                reaper.cancel()
-                with suppress(asyncio.CancelledError):
-                    await reaper
-            await gateway.aclose()
+        async with mcp_app.lifespan(mcp_app):
+            try:
+                yield
+            finally:
+                if reaper is not None:
+                    reaper.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await reaper
+                await gateway.aclose()
 
     app = gateway.rest_app(lifespan=lifespan)
+    app.mount("/mcp", mcp_app)
     server = uvicorn.Server(
         uvicorn.Config(app, host=config.rest_host, port=config.rest_port, log_level="info")
     )
@@ -284,11 +304,10 @@ async def serve_rest(config: GatewayConfig) -> None:
 
 
 async def serve_mcp_http(config: GatewayConfig) -> None:
-    """Serve the MCP surface over streamable-HTTP (networked MCP clients)."""
+    """Serve the authenticated per-session MCP surface standalone."""
     gateway = Gateway.build(config)
     await gateway.connect()
-    server, exposer = gateway.mcp_server()
-    await _apply_auto_expose(exposer, config.auto_expose)
+    server, _pool = gateway.session_mcp_server()
     try:
         await server.run_http_async(
             show_banner=False,

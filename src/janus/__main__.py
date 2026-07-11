@@ -2,8 +2,8 @@
 
     python -m janus --check     # validate environment, exit non-zero on problems
     python -m janus --stdio     # serve the MCP surface over stdio (per-client)
-    python -m janus --serve     # serve the REST API (always-on networked surface)
-    python -m janus --mcp-http  # serve the MCP surface over streamable-HTTP
+    python -m janus --serve     # serve REST + authenticated MCP-over-HTTP
+    python -m janus --mcp-http  # serve authenticated MCP-over-HTTP standalone
 
 ``--check`` is the systemd ``ExecStartPre`` gate: it fails loudly when a required
 endpoint or secret is missing, so the unit never starts in a half-configured,
@@ -31,8 +31,12 @@ def main(argv: list[str]) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="validate environment and exit")
     mode.add_argument("--stdio", action="store_true", help="serve MCP over stdio")
-    mode.add_argument("--serve", action="store_true", help="serve the REST API")
-    mode.add_argument("--mcp-http", action="store_true", help="serve MCP over HTTP")
+    mode.add_argument(
+        "--serve", action="store_true", help="serve REST + authenticated MCP over HTTP"
+    )
+    mode.add_argument(
+        "--mcp-http", action="store_true", help="serve authenticated MCP over HTTP"
+    )
     ns = parser.parse_args(argv)
 
     config = GatewayConfig.from_env()

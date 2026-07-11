@@ -113,8 +113,8 @@ cp config/janus.env.template janus.env   # then edit; keep it out of git (gitign
 python -m janus --check
 
 # 4. Serve
-python -m janus --serve       # REST API (always-on networked surface)
-python -m janus --mcp-http    # MCP over streamable-HTTP
+python -m janus --serve       # REST API + authenticated MCP at /mcp/
+python -m janus --mcp-http    # standalone authenticated MCP-over-HTTP
 python -m janus --stdio       # MCP over stdio (per-session spawn)
 ```
 
@@ -139,6 +139,12 @@ bin/janus servers          # inventory + health
 bin/janus explain <capability-id>
 bin/janus audit --limit 20
 ```
+
+Networked MCP clients connect to `http://HOST:8088/mcp/` with a bearer token
+declared in `JANUS_TOKENS`. Each `Mcp-Session-Id` receives an isolated broker,
+audit/trifecta identity, and dynamic tool view; idle session state expires after
+`JANUS_MCP_SESSION_TTL_SECONDS` (default: one hour). Missing or unknown tokens
+are rejected.
 
 **`bin/janus-admin`** — host-local administration (talks to the registry SQLite directly,
 never over the network):

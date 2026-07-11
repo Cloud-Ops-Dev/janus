@@ -1,6 +1,6 @@
 ---
 owner: Clayton
-last_reviewed: 2026-06-19
+last_reviewed: 2026-07-11
 source_of_truth_for: Janus MCP gateway operating contract for agents — extends IDE constitution
 supersedes: null
 ---
@@ -21,7 +21,7 @@ Design + phased plan: tracked in Open Brain semantic memory (`c455fed9`, `38cd49
 
 ## Governance
 
-- **Tier: RM** (registered in `~/IDE/infra/governance/repos.yaml` + the push guard). No push without a DEPLOYED RM release whose validated SHA equals HEAD. Universal git hooks installed via `bin/repo-manifest install-hooks --apply`.
+- **Tier: CRM** (registered in `~/IDE/infra/governance/repos.yaml` + the push guard). No push without a CHECKPOINTED CRM release whose validated SHA equals HEAD. Universal git hooks installed via `bin/repo-manifest install-hooks --apply`.
 - **Public repo discipline:** this repo is intended to be public. **No credentials, secrets, tokens, internal hostnames/IPs, or `op://` values in committed code.** Secrets are resolved at runtime from an external secret manager and loaded via systemd `EnvironmentFile`; nothing secret at rest.
 - **Issue tracking:** beads, in the infra store (single-tracker doctrine). No separate `.beads/` here.
 - **Commit convention:** `[charter:<phase>] <kind>: <slug> — <summary>` per constitution §14.

@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 from mcp import StdioServerParameters
 from mcp.client.session_group import ClientSessionGroup
 from mcp.types import CallToolResult, TextContent
@@ -106,6 +107,16 @@ def test_auto_expose_config_parsing() -> None:
     assert config.auto_expose == ("open_brain.capture_thought", "fake.add")
     # default: nothing auto-exposed.
     assert GatewayConfig.from_env({}).auto_expose == ()
+
+
+def test_mcp_session_ttl_config() -> None:
+    assert (
+        GatewayConfig.from_env({"JANUS_MCP_SESSION_TTL_SECONDS": "90"})
+        .mcp_session_ttl_seconds
+        == 90
+    )
+    with pytest.raises(ValueError, match="greater than zero"):
+        GatewayConfig.from_env({"JANUS_MCP_SESSION_TTL_SECONDS": "0"})
 
 
 # --------------------------------------------------------------------------- #
