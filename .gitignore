@@ -7,7 +7,12 @@ op-creds*
 *.pem
 *.key
 *_token
-*secret*
+*.secret
+*.secret.*
+*.secrets
+*.secrets.*
+secrets.*
+secrets/
 .secrets/
 config/*.local.*
 
