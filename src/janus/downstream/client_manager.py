@@ -640,6 +640,11 @@ class DownstreamClientManager:
         )
 
     # -- health ------------------------------------------------------------- #
+    # Bound list_tools so one wedged downstream cannot freeze the REST event loop
+    # (infra-6lip: hung open_brain list_tools made /v1/server/health and even
+    # unauthenticated /v1/health unresponsive until janus.service restart).
+    _HEALTH_LIST_TOOLS_TIMEOUT_S = 5.0
+
     async def health(self, server_id: str | None = None) -> dict[str, HealthStatus]:
         # Passive probe: reports connected servers + lifecycle state, but never
         # lazily connects a cold server nor resets its idle clock.
@@ -654,10 +659,26 @@ class DownstreamClientManager:
                                         error="not connected", lifecycle_state=label)
                 continue
             try:
-                result = await session.list_tools()
+                result = await asyncio.wait_for(
+                    session.list_tools(),
+                    timeout=self._HEALTH_LIST_TOOLS_TIMEOUT_S,
+                )
                 out[sid] = HealthStatus(sid, connected=True,
                                         tool_count=len(result.tools),
                                         error=None, lifecycle_state=label)
+            except TimeoutError:
+                logger.warning(
+                    "health list_tools timed out after %.1fs for server %s",
+                    self._HEALTH_LIST_TOOLS_TIMEOUT_S,
+                    sid,
+                )
+                out[sid] = HealthStatus(
+                    sid,
+                    connected=False,
+                    tool_count=None,
+                    error=f"list_tools timed out after {self._HEALTH_LIST_TOOLS_TIMEOUT_S:.0f}s",
+                    lifecycle_state=label,
+                )
             except Exception as exc:  # noqa: BLE001 — health must never raise
                 out[sid] = HealthStatus(sid, connected=False, tool_count=None,
                                         error=str(exc), lifecycle_state=label)

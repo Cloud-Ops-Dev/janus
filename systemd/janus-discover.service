@@ -15,6 +15,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Bound the crawl so a wedged discover cannot pin a core for days (infra-6lip:
+# one run stayed in activating at ~100% CPU from 2026-07-10 through 2026-07-21).
+TimeoutStartSec=300
 WorkingDirectory=%h/IDE/projects/janus
 EnvironmentFile=-%h/.config/systemd/user/op-creds.env
 EnvironmentFile=-%h/.config/systemd/user/janus.env
