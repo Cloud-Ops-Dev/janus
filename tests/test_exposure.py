@@ -15,6 +15,11 @@ from pathlib import Path
 from janus.audit import InMemoryAuditSink
 from janus.broker import Broker
 from janus.downstream import DownstreamClientManager
+from janus.exposure import (
+    DynamicToolExposer,
+    exposed_separator,
+    exposed_tool_name,
+)
 from janus.policy import Decision, PolicyContext, PolicyDecision
 from janus.registry import (
     Capability,
@@ -161,3 +166,51 @@ def test_create_mcp_server_shim_returns_plain_server() -> None:
     # back-compat: a bare FastMCP, not the (server, exposer) tuple.
     assert not isinstance(server, tuple)
     assert "capability_call" in {t.name for t in asyncio.run(server.list_tools())}
+
+
+# ── Exposed-tool naming / JANUS_EXPOSED_SEPARATOR (infra-smy1) ────────────────
+# Grok Build uses "__" as its own server/tool separator, so it silently drops any
+# janus tool whose name contains "__" — which was exactly the two auto-exposed
+# open_brain natives. The knob below lets Grok get single-underscore names while
+# Claude and Codex keep the byte-identical cap__* names their hooks/docs depend on.
+
+
+def test_default_separator_is_unchanged_for_claude_and_codex() -> None:
+    """REGRESSION LOCK. These exact strings are referenced by Claude/Codex hooks,
+    runbooks and tool-call habit (mcp__janus__cap__open_brain__search_thoughts).
+    A change here is a breaking rename for two working agents — not a refactor."""
+    assert exposed_tool_name("open_brain.search_thoughts") == "cap__open_brain__search_thoughts"
+    assert exposed_tool_name("open_brain.capture_thought") == "cap__open_brain__capture_thought"
+    assert DynamicToolExposer.tool_name("open_brain.search_thoughts") == (
+        "cap__open_brain__search_thoughts"
+    )
+
+
+def test_single_underscore_separator_emits_no_double_underscore() -> None:
+    """The Grok configuration. The whole point is that NO '__' survives anywhere in
+    the name — including in the stem, which is why the stem is joined with the
+    separator instead of being hardcoded as 'cap__'."""
+    name = exposed_tool_name("open_brain.search_thoughts", separator="_")
+    assert name == "cap_open_brain_search_thoughts"
+    assert "__" not in name
+    # ... and prefixed by Grok's own separator, it is still unambiguous to Grok.
+    assert "__" not in f"janus__{name}".removeprefix("janus__")
+
+
+def test_separator_read_from_environment() -> None:
+    assert exposed_separator({"JANUS_EXPOSED_SEPARATOR": "_"}) == "_"
+    assert exposed_separator({"JANUS_EXPOSED_SEPARATOR": "-"}) == "-"
+
+
+def test_invalid_or_empty_separator_falls_back_to_default() -> None:
+    """Fail SAFE: a broken separator degrades to today's behaviour, never to a tool
+    name a client would reject outright."""
+    for bad in ("", "   ", ".", "::", "a b", "toolongseparator", "$"):
+        assert exposed_separator({"JANUS_EXPOSED_SEPARATOR": bad}) == "__"
+    # absent entirely
+    assert exposed_separator({}) == "__"
+
+
+def test_separator_applies_to_every_dot_in_a_capability_id() -> None:
+    assert exposed_tool_name("a.b.c", separator="_") == "cap_a_b_c"
+    assert exposed_tool_name("a.b.c", separator="__") == "cap__a__b__c"

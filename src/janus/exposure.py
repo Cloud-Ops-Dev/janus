@@ -13,6 +13,9 @@ the current session may not call (policy ``deny``) is never exposed.
 
 from __future__ import annotations
 
+import os
+import re
+from collections.abc import Mapping
 from typing import Any
 
 from fastmcp import FastMCP
@@ -22,7 +25,55 @@ from pydantic import PrivateAttr
 from janus.broker import Broker
 from janus.registry.registry import EnvScope
 
-_EXPOSED_PREFIX = "cap__"
+# ── Exposed-tool naming (infra-smy1) ──────────────────────────────────────────
+# An exposed tool is named <stem><sep><capability_id with '.' -> sep>, e.g. the
+# default "__" yields cap__open_brain__search_thoughts. "__" is the historical
+# and still-default choice because capability ids already contain SINGLE
+# underscores (open_brain, search_thoughts), so "_" cannot be parsed back out.
+#
+# Janus itself never parses the name back — DynamicToolExposer keeps a
+# name -> capability_id dict — so ambiguity costs Janus nothing. It costs the
+# CLIENT: Grok Build uses "__" as its OWN server/tool separator (its events.jsonl
+# shows call_id "janus__capability_search"), so a tool called
+# janus__cap__open_brain__search_thoughts is unparseable and Grok SILENTLY DROPS
+# it with no warning. That is why Grok saw 9 janus tools where Claude saw 11:
+# the two missing were exactly the JANUS_AUTO_EXPOSE natives, the only two whose
+# names contain "__".
+#
+# So this is a per-client knob, not a global rename. DO NOT change the default:
+# cap__* names are already baked into Claude and Codex hooks, docs, and memory
+# (mcp__janus__cap__open_brain__search_thoughts). Point only Grok's stdio wrapper
+# at JANUS_EXPOSED_SEPARATOR=_ and the other two agents keep byte-identical names.
+#
+# The stem is deliberately joined with the SAME separator rather than hardcoded
+# as "cap__": a bare "cap__" prefix would smuggle a "__" back into every name and
+# defeat the knob entirely, no matter what separator the ids were joined with.
+_EXPOSED_STEM = "cap"
+_DEFAULT_SEPARATOR = "__"
+# MCP tool names are conventionally [A-Za-z0-9_-]; a separator outside that set
+# would produce names some clients reject outright. Fail safe to the default
+# rather than emit an invalid name.
+_VALID_SEPARATOR = re.compile(r"^[A-Za-z0-9_-]{1,8}$")
+
+
+def exposed_separator(environ: Mapping[str, str] | None = None) -> str:
+    """Resolve the separator used to build exposed-tool names.
+
+    Reads ``JANUS_EXPOSED_SEPARATOR`` (default ``"__"``). An empty or
+    structurally invalid value falls back to the default — a broken separator
+    should degrade to today's behaviour, never to unnameable tools.
+    """
+    env = environ if environ is not None else os.environ
+    sep = env.get("JANUS_EXPOSED_SEPARATOR", "").strip()
+    if not sep or not _VALID_SEPARATOR.match(sep):
+        return _DEFAULT_SEPARATOR
+    return sep
+
+
+def exposed_tool_name(capability_id: str, separator: str | None = None) -> str:
+    """Build the native tool name for ``capability_id``."""
+    sep = separator if separator is not None else exposed_separator()
+    return _EXPOSED_STEM + sep + capability_id.replace(".", sep)
 
 
 class _ProxyTool(Tool):  # type: ignore[misc]  # FastMCP Tool is untyped (Any)
@@ -70,7 +121,7 @@ class DynamicToolExposer:
 
     @staticmethod
     def tool_name(capability_id: str) -> str:
-        return _EXPOSED_PREFIX + capability_id.replace(".", "__")
+        return exposed_tool_name(capability_id)
 
     async def expose(
         self, capability_ids: list[str], env: EnvScope | None = None

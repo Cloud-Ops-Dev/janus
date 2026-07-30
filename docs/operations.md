@@ -65,6 +65,39 @@ shell, so it passes provided linger is enabled and the two env files exist.
 Cut over per host once a host answers read questions through Janus reliably;
 keep the direct MCP configs as documented break-glass.
 
+### Exposed-tool naming — `JANUS_EXPOSED_SEPARATOR` (per-client)
+
+Auto-exposed capabilities (`JANUS_AUTO_EXPOSE`) are surfaced as native tools
+named `cap<sep><capability_id with '.' -> sep>`, where `<sep>` defaults to `__`:
+
+    open_brain.search_thoughts  ->  cap__open_brain__search_thoughts
+
+**Do not change the default.** Those exact names are referenced by Claude and
+Codex hooks, runbooks and memory as `mcp__janus__cap__open_brain__search_thoughts`;
+a global rename breaks two working agents.
+
+`JANUS_EXPOSED_SEPARATOR` overrides `<sep>` **for one client**. It exists because
+**Grok Build uses `__` as its own server/tool separator** — its `events.jsonl`
+shows `call_id: "janus__capability_search"` — so `janus__cap__open_brain__search_thoughts`
+is ambiguous and Grok **silently drops the tool with no warning**. That is the
+whole symptom: Grok saw 9 janus tools where Claude saw 11, and the two missing
+were exactly the auto-exposed natives, the only two whose names contain `__`
+(bead `infra-smy1`).
+
+Grok's wiring therefore sets `JANUS_EXPOSED_SEPARATOR=_`, yielding
+`cap_open_brain_search_thoughts` — no `__` anywhere, including the stem, which is
+joined with the same separator precisely so a hardcoded `cap__` prefix cannot
+smuggle one back in. Janus never parses the name back (the exposer keeps a
+`name -> capability_id` dict), so the single underscore costs nothing.
+
+Set by `~/IDE/infra/bin/install-grok-build`, which is the git-tracked source of
+truth for Grok's Janus wiring. An empty or structurally invalid value falls back
+to `__` — a broken separator degrades to today's behaviour, never to a tool name
+a client would reject.
+
+Verify after any change by listing tools per client: **both** modes must report
+the same count, and the Grok mode must contain no `__`.
+
 ## bin/doctor integration (operator, infra repo)
 
 Once Janus is deployed and classified production, add a check to
