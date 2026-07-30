@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # owner: Clayton
-# last_reviewed: 2026-06-16
+# last_reviewed: 2026-07-30
 # source_of_truth_for: Janus admin CLI — approval workflow (discover/list/pending/approve/quarantine/diff) over the registry cache
 # supersedes: null
 #
@@ -9,6 +9,17 @@
 # directly, so approvals/quarantines take effect immediately without a restart.
 # Human- and host-local ONLY — never a network endpoint (approval is not an agent
 # action). Config comes from JANUS_CONFIG_DIR / JANUS_DATA_DIR (gateway defaults).
+#
+# Registry targeting (infra-6mlu, 2026-07-30). This CLI is only useful if it
+# points at the registry the LIVE gateway serves. Both janus.service and the
+# co-located stdio broker (~/.config/janus/janus-mcp-stdio.sh) load their dirs
+# from ~/.config/systemd/user/janus.env; this script previously did not, so
+# running it from the repo silently fell back to <repo>/data — a stale copy with
+# a fraction of the capabilities. On 2026-07-30 that made a real drift quarantine
+# invisible: repo-local reported "0 of 27 quarantined, callable" while the live
+# registry held "1 of 134 quarantined — open_brain.search_thoughts". An `approve`
+# written there would likewise have had no effect on the running broker. So: load
+# the same env file the gateway uses, and always print the resolved target.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/.venv/bin/python"
@@ -16,4 +27,31 @@ if [[ ! -x "$PY" ]]; then
   echo "error: $PY not found (create it: 'uv venv && uv pip install -e .[dev]')" >&2
   exit 1
 fi
+
+# Adopt the gateway's env unless the caller pinned the dirs explicitly.
+GW_ENV="${JANUS_GATEWAY_ENV:-$HOME/.config/systemd/user/janus.env}"
+if [[ -z "${JANUS_CONFIG_DIR:-}" || -z "${JANUS_DATA_DIR:-}" ]]; then
+  if [[ -f "$GW_ENV" ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    . "$GW_ENV"
+    set +a
+  fi
+fi
+: "${JANUS_CONFIG_DIR:=$ROOT/config}"
+: "${JANUS_DATA_DIR:=$ROOT/data}"
+export JANUS_CONFIG_DIR JANUS_DATA_DIR
+
+# Always name the target — a wrong registry must never be silent (infra-6mlu).
+echo "janus-admin: config_dir=$JANUS_CONFIG_DIR" >&2
+echo "janus-admin: data_dir=$JANUS_DATA_DIR" >&2
+if [[ "$JANUS_DATA_DIR" == "$ROOT/data" ]]; then
+  echo "janus-admin: WARNING — targeting the REPO-LOCAL registry, which is normally" >&2
+  echo "  NOT the one the live gateway serves. Expected gateway env: $GW_ENV" >&2
+  if [[ ! -f "$GW_ENV" ]]; then
+    echo "  (that file is absent on this host)" >&2
+  fi
+  echo "  If a live broker is running, set JANUS_CONFIG_DIR + JANUS_DATA_DIR to its dirs." >&2
+fi
+
 exec "$PY" -m janus.admin "$@"

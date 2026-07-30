@@ -77,10 +77,26 @@ deploy so `bin/doctor` does not hard-fail on an un-deployed service.
 
 Janus tracks each downstream tool's descriptor and refuses to broker one it
 hasn't reviewed. Runtime lifecycle state (approved / quarantined + the reviewed
-descriptor/schema *baseline* hashes) lives in `data/janus-registry.db` — the same
-SQLite the live gateway reads, so operator actions take effect immediately, no
-restart. Manage it with `bin/janus-admin` (host-local, human-only; never a
-network endpoint). Output is JSON.
+descriptor/schema *baseline* hashes) lives in `<JANUS_DATA_DIR>/janus-registry.db`
+— the same SQLite the live gateway reads, so operator actions take effect
+immediately, no restart. Manage it with `bin/janus-admin` (host-local,
+human-only; never a network endpoint). Output is JSON.
+
+> **Which registry am I editing?** `JANUS_DATA_DIR` / `JANUS_CONFIG_DIR` decide,
+> and they are usually **not** the in-repo `data/` + `config/`. On a deployed host
+> both `janus.service` and the co-located stdio broker
+> (`~/.config/janus/janus-mcp-stdio.sh`) load them from
+> `~/.config/systemd/user/janus.env` — e.g. `~/.local/share/janus/data`.
+> `bin/janus-admin` now sources that same file when the caller hasn't pinned the
+> dirs, and prints `config_dir=` / `data_dir=` on stderr every run so the target
+> is never a guess. **Read the printed `data_dir` before trusting any output.**
+>
+> This matters because the in-repo `data/` is a public seed copy: on 2026-07-30 it
+> reported "0 of 27 capabilities quarantined" while the live registry held "1 of
+> 134 quarantined — `open_brain.search_thoughts`, descriptor drift". A bare
+> `janus-admin list` run from the repo therefore hid a real quarantine, and an
+> `approve` written there would not have reached the running broker. Tracked as
+> `infra-6mlu`.
 
 ```bash
 bin/janus-admin discover                 # crawl downstreams, refresh observations,
