@@ -151,12 +151,21 @@ never over the network):
 
 ```bash
 bin/janus-admin discover                       # crawl downstreams, refresh observations
+bin/janus-admin list                           # every capability's lifecycle state
 bin/janus-admin pending                        # capabilities awaiting first approval
 bin/janus-admin approve <id>                   # approve + lock the reviewed baseline
 bin/janus-admin diff <id>                      # baseline-vs-observed descriptor delta
 bin/janus-admin quarantine-capability <id>
 bin/janus-admin quarantine-server <id>
 ```
+
+It targets the **live** registry — the same one the running gateway serves — by sourcing the
+gateway env (`JANUS_GATEWAY_ENV`, default `~/.config/systemd/user/janus.env`) unless you pin
+`JANUS_CONFIG_DIR` / `JANUS_DATA_DIR` yourself. Every run prints the resolved `config_dir=` and
+`data_dir=` on stderr, and warns when the target is the repo-local copy. Check that line before
+trusting any output: an earlier version defaulted to `<repo>/data`, so it reported a clean
+27-capability registry while the live one held 134 with a real quarantine — and an `approve`
+written there never reached the broker. See `docs/operations.md` → "Which registry am I editing?".
 
 ## Configuration
 
