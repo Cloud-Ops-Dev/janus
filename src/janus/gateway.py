@@ -39,6 +39,7 @@ from janus.security.output_sanitizer import OutputSanitizer
 from janus.server_mcp import build_mcp_server
 from janus.server_rest import BrokerDeps, HostIdentity, create_rest_app
 from janus.session_mcp import McpSessionPool, build_session_mcp_server
+from janus.watchdog import run_watchdog_heartbeat, sd_notify
 
 DEFAULT_REST_PORT = 8088
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -277,22 +278,47 @@ async def serve_rest(config: GatewayConfig) -> None:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        await gateway.connect()
-        reaper: asyncio.Task[None] | None = None
+        # Connect downstreams in the BACKGROUND (infra-gn2q). This used to be an
+        # `await gateway.connect()` right here, which put every always_on
+        # downstream on uvicorn's startup critical path: the listener could not
+        # bind until they had all connected. So on 2026-08-03, when the remote
+        # open_brain downstream started returning 503, the gateway never finished
+        # startup, never bound :8088, and took SIX healthy local downstreams
+        # offline with it (infra-8r1x). A broker must serve even when the things
+        # it brokers are sick — degraded, not absent. connect_all() is already
+        # tolerant of an individual failure, and lazy servers already connect on
+        # demand, so "always_on" now means "start connecting immediately",
+        # not "block the socket until connected".
+        # Task[Any]: gateway.connect() resolves to the connected server ids while
+        # the others return None. Nothing here reads a result — these are fire-and-
+        # forget lifetime tasks, cancelled together on shutdown.
+        background: list[asyncio.Task[Any]] = [
+            asyncio.create_task(gateway.connect(), name="janus-connect-all"),
+            asyncio.create_task(run_watchdog_heartbeat(), name="janus-watchdog"),
+        ]
         if config.idle_after_seconds > 0:
-            reaper = asyncio.create_task(
-                gateway.manager.run_idle_reaper(
-                    interval=config.reaper_interval_seconds
+            background.append(
+                asyncio.create_task(
+                    gateway.manager.run_idle_reaper(
+                        interval=config.reaper_interval_seconds
+                    ),
+                    name="janus-idle-reaper",
                 )
             )
         async with mcp_app.lifespan(mcp_app):
+            # Tell systemd we are up only once the socket is genuinely servable.
+            # Paired with Type=notify + WatchdogSec in the unit, this is what
+            # stops a wedged gateway from reporting "active (running)" forever.
+            sd_notify("READY=1")
             try:
                 yield
             finally:
-                if reaper is not None:
-                    reaper.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await reaper
+                sd_notify("STOPPING=1")
+                for task in background:
+                    task.cancel()
+                for task in background:
+                    with suppress(asyncio.CancelledError, Exception):
+                        await task
                 await gateway.aclose()
 
     app = gateway.rest_app(lifespan=lifespan)

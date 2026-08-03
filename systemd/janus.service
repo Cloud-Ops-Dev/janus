@@ -19,7 +19,20 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify (was simple) + WatchdogSec (infra-gn2q). On 2026-08-03 the gateway
+# wedged for ~20 minutes while this unit reported "active (running)" the whole
+# time: a downstream 503 livelocked the asyncio event loop at 100% CPU, so the
+# process was alive but served nothing, and SIGTERM could not even be handled —
+# systemd had to SIGKILL it at the stop timeout (infra-8r1x).
+#
+# "The process exists" is not liveness for an asyncio server. The gateway now
+# sends READY=1 only once the socket is genuinely servable, and heartbeats
+# WATCHDOG=1 from a task ON the event loop. If that loop is starved by this
+# livelock or any future one, the heartbeat stops, WatchdogSec expires, and
+# systemd kills and restarts the unit instead of leaving it hung and green.
+Type=notify
+NotifyAccess=main
+WatchdogSec=45
 WorkingDirectory=%h/IDE/projects/janus
 # '-' tolerates a missing file so the unit can start; --check below is what
 # actually enforces that required secrets are present (fail-loud, not silent).
