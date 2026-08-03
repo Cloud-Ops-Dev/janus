@@ -51,6 +51,51 @@ curl -s http://127.0.0.1:8088/v1/health
 The unit declares all its env via `EnvironmentFile=` and depends on no login
 shell, so it passes provided linger is enabled and the two env files exist.
 
+### Liveness watchdog — `Type=notify` + `WatchdogSec=45` (infra-gn2q)
+
+Since 2026-08-03 the unit is `Type=notify`, not `Type=simple`. **If you edit the
+unit, keep it that way**, and be aware of what it implies:
+
+- The gateway sends `READY=1` only once the socket is genuinely servable. Under
+  `Type=notify`, a unit that reaches `active (running)` has therefore *proved* it
+  bound — that state is no longer reachable by merely having a live process.
+- It then heartbeats `WATCHDOG=1` every `WatchdogSec/2` from a task **on the
+  asyncio event loop**. If the loop stalls for more than `WatchdogSec`, systemd
+  kills the process and `Restart=always` brings it back.
+
+**Why it exists.** On 2026-08-03 the gateway wedged for ~20 minutes while this unit
+reported `active (running)` the entire time: a downstream 503 livelocked the event
+loop at 100% CPU, so the process was alive and served nothing, and SIGTERM could
+not even be handled (signal delivery needs the loop to turn) — systemd had to
+SIGKILL it at the stop timeout. Incident `infra-8r1x`.
+
+**Operational consequences:**
+
+- A `Failed with result 'watchdog'` in the journal means *the event loop stalled
+  past 45s*, not that the process crashed. Treat it as a hang, and go looking for
+  a livelock or a blocking call on the loop.
+- Before restarting a suspected-wedged gateway, **dump its stacks first** —
+  `py-spy dump --pid $(systemctl --user show janus.service -p MainPID --value)`
+  (needs `sudo` when `/proc/sys/kernel/yama/ptrace_scope` is `1`). The restart
+  destroys the only evidence of *why* it wedged.
+- Running `python -m janus --serve` by hand is unaffected: every notification is
+  inert when `NOTIFY_SOCKET` is unset.
+
+Check it is actually armed and heartbeating:
+
+```bash
+systemctl --user show janus.service -p Type -p WatchdogUSec
+systemctl --user show janus.service -p WatchdogTimestamp   # must advance ~every 22.5s
+```
+
+### Downstreams do not gate startup
+
+`always_on` downstreams connect in a **background** task; the listener binds
+regardless of their health. A dead or slow downstream degrades the brokered
+surface but must never stop the gateway serving — that coupling is what let one
+remote 503 take six healthy local downstreams offline. Do not reintroduce an
+`await gateway.connect()` before the lifespan `yield`.
+
 ## Connect agents (run alongside existing MCP — do not rip out)
 
 - **Claude Code / Codex (stdio):** add an MCP server that runs
