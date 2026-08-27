@@ -2,7 +2,7 @@
 
 The :class:`Embedder` protocol decouples ranking from any specific model, so the
 default dependency-free :class:`HashingEmbedder` can be swapped for a local
-sentence-transformer or a remote claymore-1 embedding endpoint without touching
+sentence-transformer or a remote LAN embedding endpoint without touching
 the ranker — keeping Janus vendor-neutral and offline-capable (design §5.7).
 
 ``HashingEmbedder`` is a deterministic feature-hashing embedding over word

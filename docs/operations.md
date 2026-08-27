@@ -202,7 +202,7 @@ hashes travel; `diff --fetch` is the one path that shows raw text, and only to t
 operator's terminal.
 
 **Alerts.** Set `JANUS_DISCORD_WEBHOOK_URL` in `janus.env` (resolve the
-`claude-channel-webhook` value from 1Password once; never commit it). Unset =
+webhook value from the private vault once; never commit it). Unset =
 drift is still quarantined + logged, just not pinged. Schedule periodic discovery
 with a `systemd --user` timer running `bin/janus-admin discover` (Phase 4 will fold
 this into the service loop).
