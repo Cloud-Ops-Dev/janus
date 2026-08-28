@@ -12,12 +12,18 @@ import sys
 from pathlib import Path
 
 import pytest
+from mcp.client.session_group import ClientSessionGroup
 
 from janus.downstream import (
     DownstreamClientManager,
     DownstreamError,
     DownstreamNotConnected,
     EnvConnectionResolver,
+)
+from janus.downstream.client_manager import (
+    break_exception_context_cycle,
+    exception_context_is_cyclic,
+    reraise_unlinked,
 )
 from janus.registry import (
     AuthType,
@@ -330,3 +336,143 @@ def test_lazy_stdio_connects_on_demand_and_tears_down_across_tasks() -> None:
         # Context exit (worker teardown) must complete cleanly.
 
     asyncio.run(asyncio.wait_for(body(), timeout=30))
+
+
+# --------------------------------------------------------------------------- #
+# infra-gn2q — livelock root causes
+# --------------------------------------------------------------------------- #
+def _cyclic_retry_chain() -> BaseException:
+    """Build the cyclic ``__context__`` chain the 08-03 retry/teardown path produced.
+
+    Repeated connect failures + implicit chaining + AsyncExitStack attaching
+    the previous exception onto the new one walked into a loop. contextlib's
+    ``_fix_exception_context`` is ``while 1:`` over that chain.
+    """
+    e0 = RuntimeError("connect-0")
+    e1 = RuntimeError("connect-1")
+    e2 = RuntimeError("connect-2")
+    e1.__context__ = e0
+    e2.__context__ = e1
+    e0.__context__ = e2  # cycle
+    return e2
+
+
+def test_cyclic_context_is_detected_without_hanging() -> None:
+    exc = _cyclic_retry_chain()
+    assert exception_context_is_cyclic(exc) is True
+
+
+def test_old_reraise_preserves_cycle_new_reraise_breaks_it() -> None:
+    """Red-first: the unfixed ``raise last_exc`` keeps the cycle; the helper clears it."""
+    cyclic = _cyclic_retry_chain()
+    try:
+        try:
+            raise cyclic
+        except BaseException:
+            raise cyclic  # noqa: B904 — old retry reraise (no from None)
+    except BaseException as preserved:
+        assert exception_context_is_cyclic(preserved) is True
+
+    fresh = _cyclic_retry_chain()
+    try:
+        reraise_unlinked(fresh)
+    except BaseException as broken:
+        assert exception_context_is_cyclic(broken) is False
+        assert broken.__context__ is None
+        assert broken.__cause__ is None
+
+
+def test_break_helper_unlinks_cycle() -> None:
+    exc = _cyclic_retry_chain()
+    break_exception_context_cycle(exc)
+    assert exception_context_is_cyclic(exc) is False
+
+
+def test_connect_retry_reraise_breaks_chained_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry loop must not hand AsyncExitStack a cyclic __context__ chain."""
+
+    async def body() -> None:
+        mgr = DownstreamClientManager(
+            {"bad": _stdio_server("bad")},
+            connect_retries=2,
+            connect_retry_delay=0.0,
+            connect_timeout=2.0,
+        )
+        errors = [
+            RuntimeError("e0"),
+            RuntimeError("e1"),
+            RuntimeError("e2"),
+        ]
+        # Chain them the way repeated SDK failures do.
+        errors[1].__context__ = errors[0]
+        errors[2].__context__ = errors[1]
+        errors[0].__context__ = errors[2]
+        calls = {"n": 0}
+
+        async def boom(_server_id: str) -> None:
+            i = min(calls["n"], len(errors) - 1)
+            calls["n"] += 1
+            raise errors[i]
+
+        monkeypatch.setattr(mgr, "connect_server", boom)
+        async with mgr:
+            connected = await mgr.connect_all()
+            assert connected == []
+            assert "bad" in mgr.connect_failures
+            # The recorded failure came out of reraise_unlinked — no cycle.
+            assert exception_context_is_cyclic(errors[2]) is False
+
+    asyncio.run(body())
+
+
+def test_connect_timeout_does_not_cancel_worker_and_isolates_siblings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller-side timeout must not cancel the worker (wait_for-style cancel
+    is livelock 2) and a hung downstream must not block a healthy sibling."""
+
+    cancelled = {"n": 0}
+
+    original = ClientSessionGroup.connect_to_server
+
+    async def maybe_hang(self: ClientSessionGroup, params: object) -> object:
+        command = getattr(params, "command", None)
+        if command == "/nonexistent/janus-hang-forever":
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled["n"] += 1
+                raise
+            raise AssertionError("hang returned")
+        return await original(self, params)
+
+    monkeypatch.setattr(ClientSessionGroup, "connect_to_server", maybe_hang)
+
+    async def body() -> None:
+        hung = Server(
+            id="hung",
+            display_name="Hung",
+            transport=Transport.STDIO,
+            command="/nonexistent/janus-hang-forever",
+            args=[],
+            default_env_scope=[EnvScope.DEV],
+        )
+        mgr = DownstreamClientManager(
+            {"hung": hung, "good": _stdio_server("good")},
+            connect_retries=0,
+            connect_retry_delay=0.0,
+            connect_timeout=2.0,
+        )
+        async with mgr:
+            connected = await mgr.connect_all()
+            assert connected == ["good"]
+            assert "hung" in mgr.connect_failures
+            assert "timed out" in mgr.connect_failures["hung"]
+            result = await mgr.call("good", "echo", {"text": "ok"})
+            assert "ok" in result.text
+        await asyncio.sleep(0.05)
+        assert cancelled["n"] == 0
+
+    asyncio.run(asyncio.wait_for(body(), timeout=15))
