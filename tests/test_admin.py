@@ -143,6 +143,68 @@ def test_unknown_capability_and_server_raise(tmp_path: Path) -> None:
             svc.quarantine_server("nope", "x")
 
 
+def _orphan_capability(*, cap_id: str = "retired.gone", server_id: str = "fake") -> Capability:
+    """A capability id that is *not* in the loaded registry — leftover cache row."""
+    return Capability(
+        id=cap_id,
+        server_id=server_id,
+        downstream_tool_name="gone",
+        title="Retired",
+        summary="Leftover cache row after YAML retirement.",
+        risk=RiskTier.READ_ONLY,
+        env_scope=[EnvScope.DEV, EnvScope.PROD_SAFE],
+        approved=True,
+        quarantined=True,
+    )
+
+
+def test_list_states_excludes_orphans_and_preserves_declared_quarantine(
+    tmp_path: Path,
+) -> None:
+    """Orphan cache rows must not surface as quarantined capabilities (infra-ecws).
+
+    ``sync_from_registry`` is upsert-only, so retiring a server from YAML leaves
+    its capability rows in the DB. ``list_states`` must hide those undeclared
+    rows while still reporting a genuinely quarantined-but-declared capability.
+    """
+    registry = _registry(approved=True)
+    with _store(tmp_path, registry) as store:
+        store.upsert_capability(_orphan_capability())
+        store.quarantine_capability("fake.echo", reason="descriptor drift")
+
+        listed = store.list_states()
+        listed_ids = [s.capability_id for s in listed]
+        assert "retired.gone" not in listed_ids
+        assert listed_ids == ["fake.echo"]
+        assert listed[0].quarantined is True
+        assert listed[0].quarantine_reason == "descriptor drift"
+
+        svc = AdminService(registry, store)
+        assert [s.capability_id for s in svc.list_states()] == ["fake.echo"]
+
+        orphans = store.orphans()
+        assert [s.capability_id for s in orphans] == ["retired.gone"]
+        assert orphans[0].quarantined is True
+
+
+def test_prune_orphans_dry_run_then_apply(tmp_path: Path) -> None:
+    registry = _registry(approved=True)
+    with _store(tmp_path, registry) as store:
+        store.upsert_capability(_orphan_capability())
+        assert [s.capability_id for s in store.orphans()] == ["retired.gone"]
+
+        preview = store.orphans()
+        assert store.prune_orphans(apply=False) == [s.capability_id for s in preview]
+        assert store.get_state("retired.gone") is not None
+        assert [s.capability_id for s in store.orphans()] == ["retired.gone"]
+
+        deleted = store.prune_orphans(apply=True)
+        assert deleted == ["retired.gone"]
+        assert store.get_state("retired.gone") is None
+        assert store.orphans() == []
+        assert [s.capability_id for s in store.list_states()] == ["fake.echo"]
+
+
 # --------------------------------------------------------------------------- #
 # Acceptance: the broker honors live store state
 # --------------------------------------------------------------------------- #
@@ -232,3 +294,53 @@ def test_cli_unknown_capability_errors(
     _seed_env(tmp_path, monkeypatch)
     assert main(["approve", "does.not.exist"]) == 1
     assert "unknown capability" in capsys.readouterr().err
+
+
+def _seed_orphan_row(tmp_path: Path) -> None:
+    """Insert an undeclared capability into the CLI's registry cache.
+
+    The seed YAML has no ``retired.gone``; the row is a leftover from an
+    upsert-only sync after a YAML retirement.
+    """
+    from janus.gateway import REGISTRY_DB_NAME
+
+    store = SchemaStore(tmp_path / "data" / REGISTRY_DB_NAME)
+    try:
+        store.upsert_capability(
+            _orphan_capability(cap_id="retired.gone", server_id="open_brain")
+        )
+    finally:
+        store.close()
+
+
+def test_cli_orphans_and_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _seed_env(tmp_path, monkeypatch)
+    _cli_json(["list"], capsys)  # create + sync the cache
+    _seed_orphan_row(tmp_path)
+
+    listed = _cli_json(["list"], capsys)
+    listed_ids = {c["capability_id"] for c in listed["capabilities"]}
+    assert "retired.gone" not in listed_ids
+
+    orphans = _cli_json(["orphans"], capsys)
+    assert orphans["command"] == "orphans"
+    assert orphans["count"] == 1
+    assert [c["capability_id"] for c in orphans["capabilities"]] == ["retired.gone"]
+
+    dry = _cli_json(["prune"], capsys)
+    assert dry["command"] == "prune"
+    assert dry["apply"] is False
+    assert dry["count"] == 1
+    assert dry["would_delete"] == ["retired.gone"]
+    still = _cli_json(["orphans"], capsys)
+    assert still["count"] == 1
+
+    applied = _cli_json(["prune", "--apply"], capsys)
+    assert applied["apply"] is True
+    assert applied["count"] == 1
+    assert applied["deleted"] == ["retired.gone"]
+    gone = _cli_json(["orphans"], capsys)
+    assert gone["count"] == 0
+    assert gone["capabilities"] == []

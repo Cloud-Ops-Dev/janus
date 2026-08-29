@@ -193,6 +193,9 @@ class SchemaStore:
         self._conn.executescript(_SCHEMA_SQL)
         self._migrate()
         self._conn.commit()
+        # Ids declared in the last ``sync_from_registry`` call. ``None`` means
+        # the store has not been bound to a registry yet (list every cached row).
+        self._declared_ids: frozenset[str] | None = None
 
     def _migrate(self) -> None:
         """Add any post-Phase-1 columns missing from a pre-existing cache."""
@@ -260,11 +263,18 @@ class SchemaStore:
         self._conn.commit()
 
     def sync_from_registry(self, registry: Registry) -> int:
-        """Upsert every server + capability. Returns the row count written."""
+        """Upsert every server + capability. Returns the row count written.
+
+        Upsert-only by design: runtime lifecycle state must survive a restart,
+        so retiring a capability from YAML does **not** delete its cache row.
+        :meth:`list_states` hides those undeclared leftovers; :meth:`orphans`
+        / :meth:`prune_orphans` are the reconciliation path.
+        """
         for server in registry.servers.values():
             self.upsert_server(server)
         for cap in registry.capabilities.values():
             self.upsert_capability(cap)
+        self._declared_ids = frozenset(registry.capabilities)
         return len(registry.servers) + len(registry.capabilities)
 
     # -- reads -------------------------------------------------------------- #
@@ -334,7 +344,50 @@ class SchemaStore:
         return None if row is None else self._state_from_row(row)
 
     def list_states(self) -> list[CapabilityState]:
-        """Every cached capability's lifecycle state, ordered by id."""
+        """Lifecycle state of every capability declared in the loaded registry.
+
+        Rows that exist in the cache but have no registry declaration (leftovers
+        from an upsert-only sync after a YAML retirement) are excluded; see
+        :meth:`orphans`. If :meth:`sync_from_registry` has not been called,
+        every cached row is returned (no declared set to filter against).
+        """
+        return [
+            state
+            for state in self._all_states()
+            if self._declared_ids is None or state.capability_id in self._declared_ids
+        ]
+
+    def orphans(self) -> list[CapabilityState]:
+        """Cache rows whose id is not declared in the currently loaded registry.
+
+        Empty when the store has not been bound via :meth:`sync_from_registry`
+        (without a declared set, every row is equally "unknown").
+        """
+        if self._declared_ids is None:
+            return []
+        return [
+            state
+            for state in self._all_states()
+            if state.capability_id not in self._declared_ids
+        ]
+
+    def prune_orphans(self, *, apply: bool = False) -> list[str]:
+        """Delete undeclared cache rows, or preview the ids that would be deleted.
+
+        Returns the orphan capability ids either way. With ``apply=False``
+        (the default) the database is not modified.
+        """
+        ids = [state.capability_id for state in self.orphans()]
+        if apply and ids:
+            placeholders = ",".join("?" * len(ids))
+            self._conn.execute(
+                f"DELETE FROM capabilities WHERE id IN ({placeholders})",  # noqa: S608
+                ids,
+            )
+            self._conn.commit()
+        return ids
+
+    def _all_states(self) -> list[CapabilityState]:
         rows = self._conn.execute("SELECT * FROM capabilities ORDER BY id").fetchall()
         return [self._state_from_row(row) for row in rows]
 

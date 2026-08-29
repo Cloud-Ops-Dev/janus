@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # owner: Clayton
-# last_reviewed: 2026-07-30
-# source_of_truth_for: Janus admin CLI — approval workflow (discover/list/pending/approve/quarantine/diff) over the registry cache
+# last_reviewed: 2026-08-29
+# source_of_truth_for: Janus admin CLI — approval workflow (discover/list/pending/orphans/prune/approve/quarantine/diff) over the registry cache
 # supersedes: null
 #
 # bin/janus-admin — operator control plane for the Janus capability approval

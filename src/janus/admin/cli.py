@@ -7,8 +7,10 @@ host-local action, never exposed over the network.
 
 Commands:
     discover                          crawl downstreams, refresh observations
-    list                              show every capability's lifecycle state
+    list                              show every declared capability's lifecycle state
     pending                           show capabilities awaiting first approval
+    orphans                           list cache rows with no registry declaration
+    prune [--apply]                   delete undeclared cache rows (dry-run default)
     approve <id>                      approve + lock observed descriptor as baseline
     quarantine-capability <id>        mark one capability uncallable
     quarantine-server <id>            mark every capability of a server uncallable
@@ -53,8 +55,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("discover", help="crawl downstreams and refresh observations")
-    sub.add_parser("list", help="show every capability's lifecycle state")
+    sub.add_parser("list", help="show every declared capability's lifecycle state")
     sub.add_parser("pending", help="show capabilities awaiting first approval")
+    sub.add_parser(
+        "orphans",
+        help="list cache rows with no registry declaration",
+    )
+    prune = sub.add_parser(
+        "prune",
+        help="delete cache rows with no registry declaration (dry-run default)",
+    )
+    prune.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually delete orphan rows; without this flag, print what would be deleted",
+    )
 
     ap = sub.add_parser("approve", help="approve a capability + lock its baseline")
     ap.add_argument("capability_id")
@@ -130,6 +145,19 @@ def main(argv: list[str]) -> int:
         elif ns.cmd == "pending":
             _emit({"command": "pending",
                    "capabilities": [_state_dict(s) for s in svc.pending()]})
+        elif ns.cmd == "orphans":
+            rows = store.orphans()
+            _emit({"command": "orphans", "count": len(rows),
+                   "capabilities": [_state_dict(s) for s in rows]})
+        elif ns.cmd == "prune":
+            ids = store.prune_orphans(apply=ns.apply)
+            prune_payload: dict[str, Any] = {
+                "command": "prune",
+                "apply": ns.apply,
+                "count": len(ids),
+            }
+            prune_payload["deleted" if ns.apply else "would_delete"] = ids
+            _emit(prune_payload)
         elif ns.cmd == "approve":
             _emit({"command": "approve", "result": asdict(svc.approve(ns.capability_id))})
         elif ns.cmd == "quarantine-capability":
