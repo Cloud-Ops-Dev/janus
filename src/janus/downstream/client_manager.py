@@ -115,6 +115,33 @@ def reraise_unlinked(exc: BaseException) -> NoReturn:
     raise exc from None
 
 
+def connect_failure_is_permanent(exc: BaseException) -> bool:
+    """True for config-class connect failures no retry can clear.
+
+    The connect retry loop exists to ride out *transient* boot races
+    (infra-xwx: DNS / ``op`` not ready yet). A stdio downstream whose command
+    does not exist on disk (``FileNotFoundError``) fails identically on every
+    attempt — retrying only stalls startup, and on a cold stdio spawn that
+    stall lands past the MCP client's connect timeout (infra-9ahm: two missing
+    wrappers x 5 retries ~= 33s > the host's 30s budget). Walks exception
+    groups and causes so a wrapped spawn error is still recognized.
+    """
+    stack: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while stack:
+        cur = stack.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, FileNotFoundError):
+            return True
+        if isinstance(cur, BaseExceptionGroup):
+            stack.extend(cur.exceptions)
+        if cur.__cause__ is not None:
+            stack.append(cur.__cause__)
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # Connection resolution (credential broker plugs in here later)
 # --------------------------------------------------------------------------- #
@@ -561,6 +588,14 @@ class DownstreamClientManager:
                 return
             except Exception as exc:  # noqa: BLE001 — retry any connect failure
                 last_exc = exc
+                if connect_failure_is_permanent(exc):
+                    logger.warning(
+                        "downstream '%s' connect failed permanently (%s); "
+                        "not retrying",
+                        server_id,
+                        exc,
+                    )
+                    break
                 if attempt < attempts:
                     logger.info(
                         "downstream '%s' connect attempt %d/%d failed (%s); "
