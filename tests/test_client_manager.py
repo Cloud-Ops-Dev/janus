@@ -163,6 +163,49 @@ def test_connect_all_retries_transient_then_succeeds(
     asyncio.run(body())
 
 
+def test_connect_permanent_failure_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing stdio command fails fast — no retry can make the file exist.
+
+    infra-9ahm: two missing wrapper scripts x 5 retries each pushed the
+    gateway stdio cold-start past the MCP client 30s connect timeout, so
+    the whole gateway looked dead to c-desktop. Config-class failures must
+    not consume the retry budget.
+    """
+
+    async def body() -> None:
+        bad = Server(
+            id="bad",
+            display_name="Bad",
+            transport=Transport.STDIO,
+            command="/nonexistent/janus-no-such-binary",
+            args=[],
+            default_env_scope=[EnvScope.DEV],
+        )
+        mgr = DownstreamClientManager(
+            {"bad": bad},
+            connect_retries=5,
+            connect_retry_delay=0.0,
+        )
+        real_connect = mgr.connect_server
+        calls = {"n": 0}
+
+        async def counting(server_id: str) -> None:
+            calls["n"] += 1
+            await real_connect(server_id)
+
+        monkeypatch.setattr(mgr, "connect_server", counting)
+        async with mgr:
+            connected = await mgr.connect_all()
+            assert connected == []
+            assert "bad" in mgr.connect_failures
+            # Fail-fast: exactly one attempt despite connect_retries=5.
+            assert calls["n"] == 1
+
+    asyncio.run(body())
+
+
 # --------------------------------------------------------------------------- #
 # Connection resolver (unit)
 # --------------------------------------------------------------------------- #
@@ -434,6 +477,7 @@ def test_connect_timeout_does_not_cancel_worker_and_isolates_siblings(
     is livelock 2) and a hung downstream must not block a healthy sibling."""
 
     cancelled = {"n": 0}
+    hang = asyncio.Event()
 
     original = ClientSessionGroup.connect_to_server
 
@@ -441,7 +485,7 @@ def test_connect_timeout_does_not_cancel_worker_and_isolates_siblings(
         command = getattr(params, "command", None)
         if command == "/nonexistent/janus-hang-forever":
             try:
-                await asyncio.Event().wait()
+                await hang.wait()
             except asyncio.CancelledError:
                 cancelled["n"] += 1
                 raise
@@ -463,7 +507,10 @@ def test_connect_timeout_does_not_cancel_worker_and_isolates_siblings(
             {"hung": hung, "good": _stdio_server("good")},
             connect_retries=0,
             connect_retry_delay=0.0,
-            connect_timeout=2.0,
+            # Production default. 2.0s is below FastMCP stdio spawn+handshake
+            # on this host (~1.9-3.3s), so the healthy sibling timed out too
+            # and the test flaked (diagnosed 2026-09-03, pre-existing at HEAD).
+            connect_timeout=10.0,
         )
         async with mgr:
             connected = await mgr.connect_all()
@@ -472,7 +519,12 @@ def test_connect_timeout_does_not_cancel_worker_and_isolates_siblings(
             assert "timed out" in mgr.connect_failures["hung"]
             result = await mgr.call("good", "echo", {"text": "ok"})
             assert "ok" in result.text
+            # Isolation was checked while hung was still blocked. Release so
+            # close() does not wait out connect_timeout (or leak the task).
+            hang.set()
         await asyncio.sleep(0.05)
         assert cancelled["n"] == 0
 
-    asyncio.run(asyncio.wait_for(body(), timeout=15))
+    # hung consumes the full 10s connect_timeout, then sibling spawn (~3s);
+    # 25s is mechanical headroom, not a mask — a livelock still trips it.
+    asyncio.run(asyncio.wait_for(body(), timeout=25))
