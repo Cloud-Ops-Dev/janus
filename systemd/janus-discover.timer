@@ -11,7 +11,18 @@ Description=Periodic Janus descriptor-drift discovery scan
 [Timer]
 # First scan shortly after boot (once the gateway + downstreams settle), then
 # every 6 hours. Persistent catches up a scan missed while powered off.
+#
+# OnStartupSec (infra-4xrv): monotonic-anchor wedge. OnUnitActiveSec has no
+# reference until the service has run once in this manager's lifetime, and
+# OnBootSec elapses before a user manager that starts late (or a timer enabled
+# after boot+10min) can use it — both anchors unreachable, NextElapse=infinity,
+# and the timer sits enabled+active but never fires (silent 09-01..09-04 on
+# clay-cloud). OnStartupSec is relative to the USER MANAGER's startup, so a
+# fresh manager always gets a reachable first anchor; after that first run
+# OnUnitActiveSec takes over. Caught by clay-cloud-ops-check "no next elapse
+# scheduled (stalled)".
 OnBootSec=10min
+OnStartupSec=15min
 OnUnitActiveSec=6h
 Persistent=true
 
