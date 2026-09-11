@@ -5,8 +5,11 @@ description = "Janus — MCP gateway / capability broker"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.27",
-    "fastmcp>=2.14",
+    # Compatible-major caps: FastMCP 4 dropped `fastmcp.tools.tool` (Janus still
+    # imports it) and pulls MCP 2. Fresh installs must stay on 3.x / 1.x until
+    # an intentional API migration, not a silent resolver jump.
+    "mcp>=1.27,<2",
+    "fastmcp>=2.14,<4",
     "fastapi>=0.115",
     "uvicorn>=0.34",
     "pydantic>=2",
