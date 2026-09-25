@@ -86,19 +86,27 @@ class Broker:
         self._clock: Clock = clock or (lambda: datetime.now(UTC))
 
     # -- helpers ------------------------------------------------------------ #
-    def _live_callable(self, cap: Capability) -> tuple[bool, str]:
-        """``(callable, state_label)`` honoring the live store when wired.
+    def _effective_flags(self, cap: Capability) -> tuple[bool, bool]:
+        """``(approved, quarantined)`` honoring the live store when wired.
 
         The store (Phase 2) overrides the frozen registry flags so a runtime
         approval or drift-quarantine takes effect immediately, without a restart.
         Falls back to the registry capability when no store is wired or the cap
-        is not yet cached.
+        is not yet cached. Single source of resolution for both the CALL path
+        (:meth:`_live_callable`) and the EXPLAIN/DESCRIBE path (:meth:`_context`)
+        so the two can never disagree about a capability's live state
+        (infra-6h08).
         """
         approved, quarantined = cap.approved, cap.quarantined
         if self._state is not None:
             st = self._state.get_state(cap.id)
             if st is not None:
                 approved, quarantined = st.approved, st.quarantined
+        return approved, quarantined
+
+    def _live_callable(self, cap: Capability) -> tuple[bool, str]:
+        """``(callable, state_label)`` honoring the live store when wired."""
+        approved, quarantined = self._effective_flags(cap)
         if quarantined:
             return False, "quarantined"
         if not approved:
@@ -106,6 +114,9 @@ class Broker:
         return True, "approved"
 
     def _context(self, cap: Capability, env: EnvScope) -> PolicyContext:
+        approved, quarantined = self._effective_flags(cap)
+        if (approved, quarantined) != (cap.approved, cap.quarantined):
+            cap = cap.model_copy(update={"approved": approved, "quarantined": quarantined})
         return PolicyContext(
             capability=cap,
             server=self._registry.servers[cap.server_id],
