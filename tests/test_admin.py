@@ -245,6 +245,54 @@ def test_broker_pending_then_approve_then_quarantine(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# infra-6h08: policy_explain must honor live store state, not the frozen
+# registry. Real ProfilePolicyEngine (not a stub) so cap.quarantined is
+# actually consulted the way production policy does.
+# --------------------------------------------------------------------------- #
+def test_policy_explain_honors_live_quarantine(tmp_path: Path) -> None:
+    from janus.policy.engine import ProfilePolicyEngine
+
+    registry = _registry(approved=True)  # READ_ONLY, approved in the frozen registry
+
+    async def body() -> None:
+        with _store(tmp_path, registry) as store:
+            svc = AdminService(registry, store)
+            mgr = DownstreamClientManager(registry.servers)
+            async with mgr:
+                await mgr.connect_all()
+                broker = Broker(
+                    registry,
+                    mgr,
+                    ProfilePolicyEngine(),
+                    InMemoryAuditSink(),
+                    state=store,
+                    default_env=EnvScope.PROD_SAFE,
+                )
+                # Registry says approved + not quarantined -> allow, matching call.
+                assert broker.policy_explain("fake.echo")["decision"] == "allow"
+                out = await broker.capability_call(
+                    "fake.echo", {"text": "hi"}, reason="r"
+                )
+                assert out["status"] == "ok"
+
+                # Quarantine in the STORE ONLY — the frozen registry Capability
+                # object is untouched. The call path must deny immediately...
+                svc.quarantine_capability("fake.echo", "drift")
+                out = await broker.capability_call(
+                    "fake.echo", {"text": "hi"}, reason="r"
+                )
+                assert out["status"] == "denied" and "quarantined" in out["reason"]
+
+                # ...and policy_explain must agree with the call path, not
+                # silently keep reporting the stale registry-frozen "allow".
+                explanation = broker.policy_explain("fake.echo")
+                assert explanation["decision"] == "deny"
+                assert "quarantined" in explanation["reason"]
+
+    asyncio.run(body())
+
+
+# --------------------------------------------------------------------------- #
 # janus-admin CLI (store-only commands against the seed config)
 # --------------------------------------------------------------------------- #
 def _seed_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
