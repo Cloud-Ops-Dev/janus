@@ -19,6 +19,18 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"), REDACTION_PLACEHOLDER),  # OpenAI-style
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b"), REDACTION_PLACEHOLDER),  # GitHub
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), REDACTION_PLACEHOLDER),  # Slack
+    # Credential-named URL query parameters (signed/tokenized download links a
+    # browser downstream returns). Keeps the name, redacts a value of 8+ chars,
+    # so search terms and short flags (token=1) are untouched.
+    (
+        re.compile(
+            r"(?i)((?:[?&]|&amp;)(?:access_token|id_token|refresh_token|token|auth|"
+            r"api_key|apikey|key|sig|signature|x-amz-signature|x-amz-credential|"
+            r"x-amz-security-token|x-goog-signature|x-goog-credential|jwt|sessionid|"
+            r"session_token|password|secret|client_secret)=)[^&#\s\"'<>\\]{8,}"
+        ),
+        r"\1" + REDACTION_PLACEHOLDER,
+    ),
 ]
 
 
