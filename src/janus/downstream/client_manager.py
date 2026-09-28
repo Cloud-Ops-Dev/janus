@@ -2,8 +2,10 @@
 
 Wraps the python-sdk ``ClientSessionGroup`` to connect to downstream MCP servers
 over stdio / streamable-HTTP / SSE, and exposes a uniform
-``call(server_id, tool, args)`` primitive plus a health probe. Phase 1 connects
-the ``always_on`` servers eagerly at startup; lazy lifecycle is Phase 4.
+``call(server_id, tool, args)`` primitive plus a health probe. Always-on
+servers connect eagerly at startup (``connect_all``); one whose startup connect
+failed is retried on the next call, breaker-gated, the same path a lazy server
+uses on first use.
 
 Connection details (endpoints, secrets, commands) are obtained through a
 :class:`ConnectionResolver` so the credential broker (infra-22q.5) can later
@@ -412,7 +414,11 @@ class DownstreamClientManager:
         self._workers: dict[str, _ServerWorker] = {}
         self._started = False
         # Server ids that failed to connect on the last connect_all (id -> error).
+        # An id is removed once a later on-demand retry succeeds (infra-dl8u).
         self._connect_failures: dict[str, str] = {}
+        # One lock per server so connect_all and an on-demand retry cannot both
+        # spawn that downstream.
+        self._connect_locks: dict[str, asyncio.Lock] = {}
         # Phase 4 — lazy lifecycle + circuit breaker. idle_after=0 disables idle
         # reaping (every server then behaves as before). The breaker still guards
         # connects/calls regardless. Clock is monotonic + injectable for tests.
@@ -623,22 +629,27 @@ class DownstreamClientManager:
         for server_id, server in self._servers.items():
             if only_always_on and server.lifecycle is not Lifecycle.ALWAYS_ON:
                 continue
-            try:
-                await self._connect_server_with_retry(server_id)
-                connected.append(server_id)
-                lc = self._lifecycle[server_id]
-                lc.state = LifecycleState.ACTIVE
-                lc.note_used(self._clock())
-                lc.breaker.record_success()
-            except Exception as exc:  # noqa: BLE001 — tolerate any single downstream
-                self._connect_failures[server_id] = str(exc)
-                logger.warning(
-                    "downstream '%s' failed to connect after %d attempt(s); "
-                    "skipping so the gateway can still serve: %s",
-                    server_id,
-                    self._connect_retries + 1,
-                    exc,
-                )
+            # Hold the guard for the whole attempt. ensure_ready will not start
+            # a second spawn for an always-on server until this failure is
+            # recorded (or it sees the session). The lock covers the overlap
+            # where a retry is already inside connect_server.
+            async with self._connect_lock(server_id):
+                try:
+                    await self._connect_server_with_retry(server_id)
+                    connected.append(server_id)
+                    lc = self._lifecycle[server_id]
+                    lc.state = LifecycleState.ACTIVE
+                    lc.note_used(self._clock())
+                    lc.breaker.record_success()
+                except Exception as exc:  # noqa: BLE001 — tolerate any single downstream
+                    self._connect_failures[server_id] = str(exc)
+                    logger.warning(
+                        "downstream '%s' failed to connect after %d attempt(s); "
+                        "skipping so the gateway can still serve: %s",
+                        server_id,
+                        self._connect_retries + 1,
+                        exc,
+                    )
         if self._connect_failures:
             logger.warning(
                 "connect_all: %d server(s) connected, %d failed (%s)",
@@ -649,14 +660,36 @@ class DownstreamClientManager:
         return connected
 
     # -- lazy lifecycle + circuit breaker (Phase 4) ------------------------- #
-    async def ensure_ready(self, server_id: str) -> None:
-        """Make a server ready to call, connecting LAZY ones on demand.
+    def _connect_lock(self, server_id: str) -> asyncio.Lock:
+        lock = self._connect_locks.get(server_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._connect_locks[server_id] = lock
+        return lock
 
-        Always-on servers are owned by ``connect_all`` — if one is not connected
-        that is a real fault, so this leaves it untouched (the caller then raises
-        ``DownstreamNotConnected``). LAZY servers connect on first use, gated by
-        the circuit breaker: an OPEN breaker fails fast (``DEGRADED``) until the
-        cooldown elapses, then one half-open trial decides recovery.
+    def _connects_on_demand(self, server: Server, server_id: str) -> bool:
+        """Whether a missing session may be opened from ``ensure_ready``.
+
+        LAZY servers connect on first use. ALWAYS_ON servers do too, but only
+        after ``connect_all`` has finished an attempt and recorded a failure.
+        While that attempt is still in flight — or was never started — the id
+        is absent from ``_connect_failures``, and a call must not spawn.
+        """
+        if server.lifecycle is Lifecycle.LAZY:
+            return True
+        return server_id in self._connect_failures
+
+    async def ensure_ready(self, server_id: str) -> None:
+        """Make a server ready to call, connecting on demand when that is safe.
+
+        LAZY servers connect on first use. An ALWAYS_ON server whose startup
+        ``connect_all`` already failed (it is listed in ``connect_failures``)
+        is retried here on that same breaker-gated path; success drops it from
+        ``connect_failures``. An OPEN breaker fails fast (``DEGRADED``) until
+        the cooldown elapses, then one half-open trial decides recovery. An
+        always-on server that ``connect_all`` has not finished with — never
+        attempted, or still in flight — is left untouched so this does not race
+        ``connect_all`` (the caller then raises ``DownstreamNotConnected``).
         """
         server = self._servers.get(server_id)
         if server is None:
@@ -665,31 +698,40 @@ class DownstreamClientManager:
         if server_id in self._sessions:
             lc.note_used(self._clock())
             return
-        if server.lifecycle is not Lifecycle.LAZY:
-            return  # always-on, not connected -> caller raises NotConnected
-        now = self._clock()
-        if not lc.breaker.allow(now):
-            lc.state = LifecycleState.DEGRADED
-            raise DownstreamError(
-                f"server '{server_id}' is degraded (circuit breaker open) — failing fast"
-            )
-        lc.state = LifecycleState.WARMING
-        try:
-            await self.connect_server(server_id)
-        except Exception as exc:  # noqa: BLE001 — any connect failure trips the breaker
-            lc.breaker.record_failure(self._clock())
-            lc.state = (
-                LifecycleState.DEGRADED
-                if lc.breaker.state is not BreakerState.CLOSED
-                else LifecycleState.COLD
-            )
-            break_exception_context_cycle(exc)
-            raise DownstreamError(
-                f"server '{server_id}' connect failed: {exc}"
-            ) from None
-        lc.breaker.record_success()
-        lc.state = LifecycleState.ACTIVE
-        lc.note_used(self._clock())
+        if not self._connects_on_demand(server, server_id):
+            return
+        async with self._connect_lock(server_id):
+            if server_id in self._sessions:
+                lc.note_used(self._clock())
+                return
+            # connect_all may have cleared the startup failure and taken over
+            # while we waited for the guard.
+            if not self._connects_on_demand(server, server_id):
+                return
+            now = self._clock()
+            if not lc.breaker.allow(now):
+                lc.state = LifecycleState.DEGRADED
+                raise DownstreamError(
+                    f"server '{server_id}' is degraded (circuit breaker open) — failing fast"
+                )
+            lc.state = LifecycleState.WARMING
+            try:
+                await self.connect_server(server_id)
+            except Exception as exc:  # noqa: BLE001 — any connect failure trips the breaker
+                lc.breaker.record_failure(self._clock())
+                lc.state = (
+                    LifecycleState.DEGRADED
+                    if lc.breaker.state is not BreakerState.CLOSED
+                    else LifecycleState.COLD
+                )
+                break_exception_context_cycle(exc)
+                raise DownstreamError(
+                    f"server '{server_id}' connect failed: {exc}"
+                ) from None
+            self._connect_failures.pop(server_id, None)
+            lc.breaker.record_success()
+            lc.state = LifecycleState.ACTIVE
+            lc.note_used(self._clock())
 
     async def disconnect_server(self, server_id: str) -> None:
         """Tear down one server's session (idle shutdown). Safe if not connected.

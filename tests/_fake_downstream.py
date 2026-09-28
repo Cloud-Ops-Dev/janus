@@ -12,6 +12,11 @@ are passed as **command-line args** (the registry ``Server.args`` ARE forwarded)
                        the file + respawn to simulate descriptor drift)
     --extra-tool       expose an additional ``extra`` tool not in the registry
                        (to exercise unregistered-tool discovery)
+    --fail-if-file PATH
+                       exit non-zero at startup while PATH exists (a missing
+                       or removed file lets the server come up healthy)
+    --spawn-file PATH  append one line per process start so tests can count
+                       spawns, including ones that then fail
 """
 
 from __future__ import annotations
@@ -29,7 +34,19 @@ def build() -> FastMCP:
     parser = argparse.ArgumentParser()
     parser.add_argument("--desc-file")
     parser.add_argument("--extra-tool", action="store_true")
+    parser.add_argument("--fail-if-file")
+    parser.add_argument("--spawn-file")
     ns, _ = parser.parse_known_args()
+
+    # Count the process even when it is about to refuse to serve, so a test
+    # can tell a fast-fail (no spawn) from another failed handshake.
+    if ns.spawn_file:
+        spawn_path = Path(ns.spawn_file)
+        spawn_path.parent.mkdir(parents=True, exist_ok=True)
+        with spawn_path.open("a", encoding="utf-8") as fh:
+            fh.write("spawn\n")
+    if ns.fail_if_file and Path(ns.fail_if_file).exists():
+        raise SystemExit(1)
 
     echo_desc = _DEFAULT_ECHO_DESC
     if ns.desc_file:

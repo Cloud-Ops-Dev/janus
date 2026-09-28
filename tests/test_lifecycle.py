@@ -4,6 +4,9 @@ Pure unit tests over the breaker/state machine (clock-injected, deterministic),
 then manager integration over the real ``_fake_downstream.py`` stdio server:
 a LAZY server connects on first call, is reaped when idle, reconnects on the
 next call, and a server that fails to connect trips the breaker to DEGRADED.
+
+infra-dl8u: an always-on server whose startup spawn failed is retried on the
+next call (breaker-gated). One ``connect_all`` never attempted is not spawned.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from janus.downstream import (
     CircuitBreaker,
     DownstreamClientManager,
     DownstreamError,
+    DownstreamNotConnected,
     LifecycleState,
     ServerLifecycle,
 )
@@ -183,5 +187,111 @@ def test_failing_lazy_server_trips_breaker_to_degraded() -> None:
             # the next call fails fast on the open breaker (no connect attempt).
             with pytest.raises(DownstreamError, match="circuit breaker open"):
                 await mgr.call("bad", "echo", {"text": "x"})
+
+    asyncio.run(body())
+
+
+# --------------------------------------------------------------------------- #
+# always-on startup failure is retried on the next call (infra-dl8u)
+# --------------------------------------------------------------------------- #
+def _always_on(sid: str, *extra_args: str) -> Server:
+    return Server(
+        id=sid,
+        display_name=sid,
+        transport=Transport.STDIO,
+        command=sys.executable,
+        args=[FAKE, *extra_args],
+        lifecycle=Lifecycle.ALWAYS_ON,
+        default_env_scope=[EnvScope.DEV],
+    )
+
+
+def _spawn_count(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line)
+
+
+def test_always_on_failed_startup_is_retried_on_call(tmp_path: Path) -> None:
+    """A startup spawn that failed is connected on the next call once healthy."""
+
+    async def body() -> None:
+        gate = tmp_path / "fail"
+        gate.write_text("block\n", encoding="utf-8")
+        server = _always_on("pc", "--fail-if-file", str(gate))
+        mgr = DownstreamClientManager(
+            {"pc": server},
+            connect_retries=0,
+            connect_retry_delay=0.0,
+        )
+        async with mgr:
+            assert await mgr.connect_all() == []
+            assert "pc" in mgr.connect_failures
+            gate.unlink()  # downstream is healthy now; the session must recover
+            out = await mgr.call("pc", "echo", {"text": "hi"})
+            assert out.is_error is False
+            assert "hi" in out.text
+            assert "pc" not in mgr.connect_failures
+            assert mgr.lifecycle_state("pc") is LifecycleState.ACTIVE
+
+    asyncio.run(body())
+
+
+def test_always_on_persistent_failure_opens_breaker_without_new_spawn(
+    tmp_path: Path,
+) -> None:
+    """Repeated reconnect failures trip the breaker; an open breaker does not spawn."""
+
+    async def body() -> None:
+        now = [1_000.0]
+        gate = tmp_path / "fail"
+        gate.write_text("block\n", encoding="utf-8")
+        spawns = tmp_path / "spawns"
+        server = _always_on(
+            "pc", "--fail-if-file", str(gate), "--spawn-file", str(spawns)
+        )
+        mgr = DownstreamClientManager(
+            {"pc": server},
+            connect_retries=0,
+            connect_retry_delay=0.0,
+            breaker_threshold=3,
+            breaker_cooldown=30.0,
+            clock=lambda: now[0],
+        )
+        async with mgr:
+            assert await mgr.connect_all() == []
+            assert "pc" in mgr.connect_failures
+            after_startup = _spawn_count(spawns)
+            assert after_startup >= 1
+            for _ in range(3):
+                with pytest.raises(DownstreamError):
+                    await mgr.call("pc", "echo", {"text": "x"})
+            assert mgr.lifecycle_state("pc") is LifecycleState.DEGRADED
+            after_attempts = _spawn_count(spawns)
+            assert after_attempts > after_startup  # the retries did spawn
+            with pytest.raises(DownstreamError, match="circuit breaker open"):
+                await mgr.call("pc", "echo", {"text": "x"})
+            # Frozen clock: cooldown cannot elapse, so this call must not spawn.
+            assert _spawn_count(spawns) == after_attempts
+
+    asyncio.run(body())
+
+
+def test_always_on_never_attempted_does_not_spawn(tmp_path: Path) -> None:
+    """connect_all never ran: a call must not race it by spawning the child."""
+
+    async def body() -> None:
+        spawns = tmp_path / "spawns"
+        server = _always_on("pc", "--spawn-file", str(spawns))
+        mgr = DownstreamClientManager(
+            {"pc": server},
+            connect_retries=0,
+            connect_retry_delay=0.0,
+        )
+        async with mgr:
+            with pytest.raises(DownstreamNotConnected):
+                await mgr.call("pc", "echo", {"text": "x"})
+            assert _spawn_count(spawns) == 0
+            assert "pc" not in mgr.connected_servers
 
     asyncio.run(body())
