@@ -1,4 +1,4 @@
-"""Broker core — the logic behind Janus's 7 agent-facing tools (design §3).
+"""Broker core — the logic behind Janus's agent-facing tools (design §3).
 
 The broker is the single enforcement point: every ``capability_call`` passes
 through policy, is audited, and only then reaches a downstream. The broker
@@ -35,7 +35,7 @@ from janus.registry.registry import (
 )
 from janus.registry.schema_store import CapabilityStateProvider
 from janus.search.ranker import BlendedRanker
-from janus.security.output_sanitizer import NullSanitizer, ResultSanitizer
+from janus.security.output_sanitizer import NullSanitizer, OutputSanitizer, ResultSanitizer
 
 Clock = Callable[[], datetime]
 
@@ -367,7 +367,18 @@ class Broker:
             )
             return {"status": "error", "capability_id": cap.id, "error": str(exc)}
 
-        result = self._sanitizer.sanitize(result, trust_level=server.trust_level)
+        truncation = None
+        if isinstance(self._sanitizer, OutputSanitizer):
+            try:
+                result, truncation = self._sanitizer.sanitize_for_call(
+                    result, trust_level=server.trust_level, owner=self._session_id,
+                    capability_id=cap.id, env=str(env), confirmed=confirmed,
+                )
+            except ValueError as exc:
+                self._audit_record(cap, env, audit_decision, "error", reason, arg_keys)
+                return {"status": "error", "capability_id": cap.id, "error": str(exc)}
+        else:
+            result = self._sanitizer.sanitize(result, trust_level=server.trust_level)
         latency = self._elapsed_ms(started)
         status = "error" if result.is_error else "ok"
         self._audit_record(cap, env, audit_decision, status, reason, arg_keys, latency)
@@ -375,13 +386,38 @@ class Broker:
         # session so a later external-comm call sees the accumulated exposure.
         if self._trifecta is not None:
             self._trifecta.record(self._session_id, cap, server)
-        return {
+        response = {
             "status": status,
             "capability_id": cap.id,
             "is_error": result.is_error,
             "text": result.text,
             "structured": result.structured,
         }
+        if truncation is not None:
+            response["truncation"] = truncation
+        return response
+
+    def result_read(self, handle: str, offset: int, limit: int = 20_000) -> dict[str, Any]:
+        """Read a redacted slice only for the original session and current policy."""
+        if not isinstance(self._sanitizer, OutputSanitizer):
+            return {"status": "error", "error": "result continuation unavailable"}
+        entry = self._sanitizer.lookup(handle, self._session_id)
+        if entry is None:
+            return {"status": "error", "error": "unknown or expired result handle"}
+        cap = self._registry.capabilities.get(entry.capability_id)
+        if cap is None or not self._live_callable(cap)[0]:
+            return {"status": "denied", "error": "capability is no longer callable"}
+        env = EnvScope(entry.env)
+        decision = self._policy.evaluate(self._context(cap, env))
+        if decision.decision is Decision.DENY or (
+            decision.decision is Decision.CONFIRM and not (entry.confirmed and self._attended)
+        ):
+            return {"status": "denied", "error": decision.reason}
+        try:
+            text, truncation = self._sanitizer.read(handle, entry, offset, limit)
+        except ValueError as exc:
+            return {"status": "error", "error": str(exc)}
+        return {"status": "ok", "text": text, "truncation": truncation}
 
     def _elapsed_ms(self, started: datetime) -> float:
         return (self._clock() - started).total_seconds() * 1000.0

@@ -235,6 +235,10 @@ def build_session_mcp_server(
             return {"status": "error", "error": str(exc)}
 
     @mcp.tool
+    async def result_read(handle: str, offset: int, limit: int = 20_000) -> dict[str, Any]:
+        return current().broker.result_read(handle, offset, limit)
+
+    @mcp.tool
     async def server_list() -> dict[str, Any]:
         return current().broker.server_list()
 

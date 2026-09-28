@@ -101,6 +101,12 @@ class CallBody(BaseModel):
     confirm: bool = False
 
 
+class ResultReadBody(BaseModel):
+    handle: str
+    offset: int
+    limit: int = 20_000
+
+
 class ExplainBody(BaseModel):
     capability_id: str
     env: str | None = None
@@ -160,6 +166,10 @@ def create_rest_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/result/read")
+    async def result_read(body: ResultReadBody, identity: Identity) -> dict[str, Any]:
+        return deps.broker_for(identity).result_read(body.handle, body.offset, body.limit)
 
     @app.post("/v1/policy/explain")
     async def explain(body: ExplainBody, identity: Identity) -> dict[str, Any]:

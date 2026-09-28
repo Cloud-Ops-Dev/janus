@@ -1,4 +1,4 @@
-"""FastMCP server — exposes Janus's 7 broker tools as one small MCP surface.
+"""FastMCP server — exposes Janus's broker tools as one small MCP surface.
 
 This is the entire agent-facing tool surface (design §3). Everything else (Open
 Brain, Paperclip, Beads, ...) stays an implementation detail behind the broker.
@@ -35,7 +35,7 @@ def build_mcp_server(
 
     ``dynamic_exposure`` (Phase 6) adds ``capability_expose`` / ``capability_
     unexpose`` so clients that handle ``tools/list_changed`` can surface searched
-    capabilities as native tools. It is purely additive — the core 7 tools and
+    capabilities as native tools. It is purely additive — the core tools and
     the universal ``capability_call`` fallback are unchanged.
 
     The returned exposer (``None`` when ``dynamic_exposure`` is off) lets the
@@ -92,6 +92,11 @@ def build_mcp_server(
             )
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
+
+    @mcp.tool
+    async def result_read(handle: str, offset: int, limit: int = 20_000) -> dict[str, Any]:
+        """Read a slice of a truncated result using its handle and next_offset."""
+        return broker.result_read(handle, offset, limit)
 
     @mcp.tool
     async def server_list() -> dict[str, Any]:

@@ -10,10 +10,21 @@ broker through two front doors:
 | REST | `python -m janus --serve` (`/v1/`) | Hermes Desktop + `bin/janus` CLI |
 | MCP / HTTP only | `python -m janus --mcp-http` | Standalone networked MCP process |
 
-The stable agent-facing surface is 7 broker tools: `capability_search`,
-`capability_describe`, `capability_call`, `server_list`, `server_health`,
+The stable agent-facing surface is 8 broker tools: `capability_search`,
+`capability_describe`, `capability_call`, `result_read`, `server_list`, `server_health`,
 `policy_explain`, `audit_recent`, plus the optional dynamic-exposure controls
 `capability_expose` and `capability_unexpose`.
+
+Long sanitized results return up to 20,000 Unicode characters in `text` and a
+`truncation` object containing `total_chars`, `returned_range` (start inclusive,
+end exclusive), `next_offset`, `handle`, and the SHA-256 of the full redacted text.
+For truncated calls, `structured` is null so it cannot bypass the text budget.
+Call `result_read(handle, next_offset, limit)` (REST: `POST /v1/result/read`) until
+`next_offset` is null, then concatenate the `text` slices and verify the hash.
+Each slice is capped at 20,000 characters. Results live only in bounded memory
+for 15 minutes; a handle is tied to the calling identity/session and current
+policy for its original capability. Missing, expired, and evicted handles cannot
+be recovered.
 
 ## Configure
 
