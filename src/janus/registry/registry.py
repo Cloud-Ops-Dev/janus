@@ -21,6 +21,7 @@ resolved at runtime by the credential broker.
 from __future__ import annotations
 
 import enum
+import re
 from pathlib import Path
 
 import yaml
@@ -41,6 +42,19 @@ class Transport(enum.StrEnum):
     HTTP = "http"
     SSE = "sse"
     STREAMABLE_HTTP = "streamable_http"
+    # In-process handler. No endpoint, command, or credential. The broker
+    # dispatches ``Capability.handler`` itself; the MCP client never connects.
+    NATIVE = "native"
+
+
+# Handler ids the registry will load. Anything else is rejected at load so a
+# typo cannot register a capability that fails open or reaches the network.
+NATIVE_HANDLERS: frozenset[str] = frozenset({"github_public.issue_get"})
+
+_OWNER_REPO_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98})/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98})$"
+)
+_IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 class TrustLevel(enum.StrEnum):
@@ -144,7 +158,12 @@ class ServerAuth(BaseModel):
 
 
 class Server(BaseModel):
-    """A declared downstream MCP server."""
+    """A declared downstream server.
+
+    MCP transports (stdio, http, sse, streamable_http) are connected by the
+    client manager. ``native`` is an in-process handler: it has no endpoint,
+    command, or credential, and the broker dispatches it directly.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -192,6 +211,28 @@ class Server(BaseModel):
                 raise ValueError(
                     f"server '{self.id}': stdio transport must not set endpoint_env"
                 )
+        elif self.transport is Transport.NATIVE:
+            if (
+                self.endpoint_env
+                or self.command
+                or self.command_env
+                or self.args
+                or self.env
+                or self.env_passthrough
+            ):
+                raise ValueError(
+                    f"server '{self.id}': native transport must not declare a "
+                    "connection (no endpoint, command, args, or env)"
+                )
+            if (
+                self.auth.type is not AuthType.NONE
+                or self.auth.secret_env
+                or self.auth.secret_ref
+                or self.auth.extra_headers
+            ):
+                raise ValueError(
+                    f"server '{self.id}': native transport must not declare auth or secrets"
+                )
         else:
             if not self.endpoint_env:
                 raise ValueError(
@@ -233,11 +274,68 @@ class Capability(BaseModel):
     input_schema_hash: str | None = None
     last_verified: str | None = None
     tags: list[str] = Field(default_factory=list)
+    # In-process handler id (see ``NATIVE_HANDLERS``). Unset for MCP tools.
+    handler: str | None = None
+    # Empty: every identity that passes profile policy may use the capability.
+    # Non-empty: only these principal labels (HostIdentity.label) may search or
+    # call it. Not MCP session keys. Native handlers must set this. Describe
+    # still returns the policy decision so a denied identity sees an explicit deny.
+    allowed_identities: list[str] = Field(default_factory=list)
+    # Public ``owner/name`` repositories a native read handler may touch.
+    # MCP capabilities leave this empty. Entries are the canonical spelling.
+    repo_allowlist: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_env_scope(self) -> Capability:
         if not self.env_scope:
             raise ValueError(f"capability '{self.id}': env_scope must be non-empty")
+        if self.handler is not None:
+            if self.handler not in NATIVE_HANDLERS:
+                raise ValueError(
+                    f"capability '{self.id}': unknown handler '{self.handler}'"
+                )
+            if not self.allowed_identities:
+                raise ValueError(
+                    f"capability '{self.id}': handler '{self.handler}' requires "
+                    "allowed_identities (deny by default)"
+                )
+        elif self.allowed_identities:
+            raise ValueError(
+                f"capability '{self.id}': allowed_identities requires a handler"
+            )
+        if self.handler == "github_public.issue_get" and not self.repo_allowlist:
+            raise ValueError(
+                f"capability '{self.id}': github issue lookup requires a "
+                "non-empty repo_allowlist"
+            )
+        seen_ids: set[str] = set()
+        for identity in self.allowed_identities:
+            if not _IDENTITY_RE.fullmatch(identity):
+                raise ValueError(
+                    f"capability '{self.id}': invalid allowed identity '{identity}'"
+                )
+            if identity in seen_ids:
+                raise ValueError(
+                    f"capability '{self.id}': duplicate allowed identity '{identity}'"
+                )
+            seen_ids.add(identity)
+        seen_repos: set[str] = set()
+        for repo in self.repo_allowlist:
+            if not _OWNER_REPO_RE.fullmatch(repo) or ".." in repo:
+                raise ValueError(
+                    f"capability '{self.id}': invalid repo allowlist entry '{repo}'"
+                )
+            key = repo.casefold()
+            if key in seen_repos:
+                raise ValueError(
+                    f"capability '{self.id}': duplicate repo allowlist entry '{repo}'"
+                )
+            seen_repos.add(key)
+        if self.repo_allowlist and self.handler != "github_public.issue_get":
+            raise ValueError(
+                f"capability '{self.id}': repo_allowlist is only valid for "
+                "github_public.issue_get"
+            )
         return self
 
     @property

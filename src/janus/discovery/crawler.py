@@ -29,7 +29,7 @@ from janus.downstream.client_manager import (
     DownstreamError,
     ToolInfo,
 )
-from janus.registry.registry import Capability, Registry
+from janus.registry.registry import Capability, Registry, Transport
 from janus.registry.schema_store import SchemaStore, hash_schema, hash_text
 
 Clock = Callable[[], datetime]
@@ -128,7 +128,12 @@ class DiscoveryCrawler:
         server_errors: dict[str, str] = {}
         unregistered: dict[str, list[str]] = {}
 
-        for server_id in self._registry.servers:
+        for server_id, server in self._registry.servers.items():
+            # Native handlers are reviewed code, not an untrusted downstream
+            # descriptor. Crawling them would look for an MCP tool and mark the
+            # capability missing.
+            if server.transport is Transport.NATIVE:
+                continue
             caps = self._registry.capabilities_for_server(server_id)
             tools_by_name: dict[str, ToolInfo] = {}
             try:

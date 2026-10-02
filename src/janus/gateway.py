@@ -31,7 +31,7 @@ from janus.exposure import DynamicToolExposer
 from janus.policy.engine import ProfilePolicyEngine
 from janus.policy.profiles import load_profiles
 from janus.policy.trifecta import TrifectaGuard
-from janus.registry.registry import EnvScope, load_registry
+from janus.registry.registry import EnvScope, Transport, load_registry
 from janus.registry.schema_store import SchemaStore
 from janus.search.ranker import BlendedRanker
 from janus.security.credential_broker import CredentialBroker
@@ -136,6 +136,9 @@ def check_environment(config: GatewayConfig, environ: Mapping[str, str]) -> list
     registry = load_registry(config.config_dir)
     needs_op = False
     for sid, server in registry.servers.items():
+        if server.transport is Transport.NATIVE:
+            # In-process handler: no endpoint and no secret to resolve.
+            continue
         if server.endpoint_env and not environ.get(server.endpoint_env):
             problems.append(f"server '{sid}': endpoint env '{server.endpoint_env}' is unset")
         if server.auth.secret_env and not environ.get(server.auth.secret_env):

@@ -27,6 +27,7 @@ from janus.audit.types import AuditSink
 from janus.broker import Broker
 from janus.discovery.alerts import Alerter
 from janus.downstream.client_manager import DownstreamClientManager
+from janus.downstream.github_issues import GithubIssueLookup
 from janus.policy.trifecta import TrifectaGuard
 from janus.policy.types import PolicyEngine
 from janus.registry.registry import EnvScope, Registry
@@ -61,8 +62,15 @@ class BrokerDeps:
     # precomputed once); None -> keyword search.
     ranker: BlendedRanker | None = None
     default_env: EnvScope = EnvScope.PROD_SAFE
+    issue_lookup: GithubIssueLookup | None = None
 
-    def broker_for(self, identity: HostIdentity) -> Broker:
+    def broker_for(self, identity: HostIdentity, *, session_id: str | None = None) -> Broker:
+        """Broker for one authenticated principal.
+
+        REST omits ``session_id``, so the audit key stays the token label.
+        MCP passes a per-session key. Policy always uses ``identity.label``
+        and does not parse that key.
+        """
         return Broker(
             self.registry,
             self.manager,
@@ -73,10 +81,12 @@ class BrokerDeps:
             trifecta=self.trifecta,
             alerter=self.alerter,
             ranker=self.ranker,
-            session_id=identity.label,
+            session_id=identity.label if session_id is None else session_id,
+            identity=identity.label,
             profile=identity.profile,
             attended=identity.attended,
             default_env=self.default_env,
+            issue_lookup=self.issue_lookup,
         )
 
 

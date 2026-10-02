@@ -1,5 +1,5 @@
 # owner: Clayton
-# last_reviewed: 2026-06-18
+# last_reviewed: 2026-09-30
 # source_of_truth_for: Janus downstream MCP server registry — transport, trust, risk ceiling, env scope (Phase-1 seed)
 # supersedes: null
 #
@@ -78,3 +78,16 @@ servers:
     risk_ceiling: read_only
     default_env_scope: [dev, prod_safe]
     tags: [agents, projects, issues, board]
+
+  # In-process read of the public GitHub issue API. No endpoint, token, or
+  # command: the broker dispatches github_public.issue_get itself. The risk
+  # ceiling is read_only, so a mutation capability cannot be registered here.
+  # trust_level third_party marks issue titles as untrusted content.
+  github_public:
+    display_name: GitHub public issues
+    transport: native
+    lifecycle: always_on
+    trust_level: third_party
+    risk_ceiling: read_only
+    default_env_scope: [dev, test, prod_safe]
+    tags: [github, issues, public, read]

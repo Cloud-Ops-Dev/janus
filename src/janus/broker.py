@@ -23,6 +23,12 @@ from janus.downstream.client_manager import (
     DownstreamClientManager,
     DownstreamError,
 )
+from janus.downstream.github_issues import (
+    GithubIssueLookup,
+    IssueLookupError,
+    handler_input_schema,
+    invoke_handler,
+)
 from janus.policy.trifecta import TrifectaGuard, legs_for
 from janus.policy.types import Decision, PolicyContext, PolicyEngine
 from janus.registry.registry import (
@@ -60,10 +66,12 @@ class Broker:
         alerter: Alerter | None = None,
         ranker: BlendedRanker | None = None,
         session_id: str = "default",
+        identity: str | None = None,
         profile: str = "default_assistant",
         attended: bool = True,
         default_env: EnvScope = EnvScope.PROD_SAFE,
         clock: Clock | None = None,
+        issue_lookup: GithubIssueLookup | None = None,
     ) -> None:
         self._registry = registry
         self._manager = manager
@@ -80,10 +88,15 @@ class Broker:
         # Phase 5: semantic blended ranker; None -> Phase-1 keyword scoring.
         self._ranker = ranker
         self._session_id = session_id
+        # Allowlists compare this authenticated principal. It stays equal to
+        # the session key only when the caller has no separate key (REST).
+        # MCP passes both. Never derived by parsing ``_session_id``.
+        self._identity = session_id if identity is None else identity
         self._profile = profile
         self._attended = attended
         self._default_env = default_env
         self._clock: Clock = clock or (lambda: datetime.now(UTC))
+        self._issue_lookup = issue_lookup or GithubIssueLookup()
 
     # -- helpers ------------------------------------------------------------ #
     def _effective_flags(self, cap: Capability) -> tuple[bool, bool]:
@@ -123,6 +136,7 @@ class Broker:
             env=env,
             profile=self._profile,
             attended=self._attended,
+            identity=self._identity,
         )
 
     def _audit_record(
@@ -233,16 +247,23 @@ class Broker:
 
         input_schema: dict[str, Any] | None = None
         schema_error: str | None = None
-        try:
-            tools = await self._manager.list_tools(cap.server_id)
-            match = next(
-                (t for t in tools if t.name == cap.downstream_tool_name), None
-            )
-            input_schema = match.input_schema if match is not None else None
-            if match is None:
-                schema_error = "downstream tool not found"
-        except DownstreamError as exc:
-            schema_error = str(exc)
+        if cap.handler:
+            # Reviewed in-process schema. Do not open an MCP session or the network.
+            try:
+                input_schema = handler_input_schema(cap)
+            except IssueLookupError as exc:
+                schema_error = str(exc)
+        else:
+            try:
+                tools = await self._manager.list_tools(cap.server_id)
+                match = next(
+                    (t for t in tools if t.name == cap.downstream_tool_name), None
+                )
+                input_schema = match.input_schema if match is not None else None
+                if match is None:
+                    schema_error = "downstream tool not found"
+            except DownstreamError as exc:
+                schema_error = str(exc)
 
         return {
             "capability_id": cap.id,
@@ -357,9 +378,33 @@ class Broker:
         audit_decision = "confirm" if confirm_tier else "allow"
         started = self._clock()
         try:
-            result = await self._manager.call(
-                cap.server_id, cap.downstream_tool_name, arguments
+            if cap.handler:
+                result = await invoke_handler(self._issue_lookup, cap, arguments)
+            else:
+                result = await self._manager.call(
+                    cap.server_id, cap.downstream_tool_name, arguments
+                )
+        except IssueLookupError as exc:
+            latency = self._elapsed_ms(started)
+            if exc.denied:
+                self._audit_record(
+                    cap, env, "deny", "blocked", str(exc), arg_keys, latency
+                )
+                return {
+                    "status": "denied",
+                    "capability_id": cap.id,
+                    "reason": str(exc),
+                    "error_code": exc.code,
+                }
+            self._audit_record(
+                cap, env, audit_decision, "error", str(exc), arg_keys, latency
             )
+            return {
+                "status": "error",
+                "capability_id": cap.id,
+                "error": str(exc),
+                "error_code": exc.code,
+            }
         except DownstreamError as exc:
             latency = self._elapsed_ms(started)
             self._audit_record(
@@ -512,6 +557,7 @@ class Broker:
             "requires_confirmation": cap.requires_confirmation,
             "decision": str(decision.decision),
             "reason": decision.reason,
+            "identity": self._identity,
             # Static lethal-trifecta legs this capability lights (the runtime
             # guard escalates only when a call would complete the combination).
             "trifecta_legs": sorted(legs_for(cap, server)),

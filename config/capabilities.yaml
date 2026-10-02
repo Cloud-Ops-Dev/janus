@@ -1,5 +1,5 @@
 # owner: Clayton
-# last_reviewed: 2026-06-19
+# last_reviewed: 2026-09-30
 # source_of_truth_for: Janus brokered-capability registry — one entry per approved downstream tool (Phase-1 seed + Phase-3 writes + full open_brain surface)
 # supersedes: null
 #
@@ -311,3 +311,27 @@ capabilities:
     env_scope: [dev, prod_safe]
     approved: true
     tags: [health]
+
+  # Public GitHub issue GET. One issue in an explicit owner/name allowlist.
+  # allowed_identities is deny-by-default and lists Janus token labels
+  # (authenticated principals). MCP session keys stay a separate audit id.
+  # `retinue` is the shared Retinue principal: every room on that identity
+  # can perform this read.
+  # prod is intentionally absent. No token is configured or sent.
+  github_public.issue_get:
+    server_id: github_public
+    downstream_tool_name: issue_get
+    handler: github_public.issue_get
+    title: Read a public GitHub issue
+    summary: >-
+      Read the current title, state, updated time, and URL of one issue in an
+      allowlisted public GitHub repository. Issue GET only. Seed allowlist:
+      novique-ai/retinue.
+    risk: read_only
+    env_scope: [dev, test, prod_safe]
+    approved: true
+    allowed_identities:
+      - retinue
+    repo_allowlist:
+      - novique-ai/retinue
+    tags: [github, issues, public, read]

@@ -32,6 +32,10 @@ class PolicyContext:
     # Is a human present to answer a confirm prompt? Unattended confirm-tier
     # actions are hard-denied (locked operator decision, 2026-06-16).
     attended: bool = True
+    # Authenticated principal (HostIdentity.label). Compared exactly to
+    # Capability.allowed_identities when that list is non-empty. Separate from
+    # the audit and MCP session key. Empty fails closed against a non-empty list.
+    identity: str = ""
 
 
 @dataclass(frozen=True)

@@ -37,6 +37,7 @@ def test_seed_config_loads_and_is_valid() -> None:
         "beads_readonly",
         "beads_operator",
         "paperclip",
+        "github_public",
     }
     assert len(registry.capabilities) >= 9
     # every seed capability is approved, not quarantined -> callable

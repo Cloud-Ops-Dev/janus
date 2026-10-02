@@ -488,7 +488,12 @@ class DownstreamClientManager:
 
     @property
     def connected_servers(self) -> list[str]:
-        return list(self._sessions)
+        native = [
+            sid
+            for sid, server in self._servers.items()
+            if server.transport is Transport.NATIVE and sid not in self._sessions
+        ]
+        return list(self._sessions) + native
 
     @property
     def connect_failures(self) -> dict[str, str]:
@@ -627,6 +632,15 @@ class DownstreamClientManager:
         connected: list[str] = []
         self._connect_failures = {}
         for server_id, server in self._servers.items():
+            if server.transport is Transport.NATIVE:
+                # In-process handler: nothing to connect, and a failed MCP
+                # connect must not be recorded for it.
+                lc = self._lifecycle[server_id]
+                lc.state = LifecycleState.ACTIVE
+                lc.note_used(self._clock())
+                lc.breaker.record_success()
+                connected.append(server_id)
+                continue
             if only_always_on and server.lifecycle is not Lifecycle.ALWAYS_ON:
                 continue
             # Hold the guard for the whole attempt. ensure_ready will not start
@@ -780,6 +794,7 @@ class DownstreamClientManager:
     async def call(
         self, server_id: str, tool: str, arguments: dict[str, Any] | None = None
     ) -> DownstreamResult:
+        self._reject_native(server_id, tool)
         await self.ensure_ready(server_id)
         session = self._sessions.get(server_id)
         if session is None:
@@ -812,7 +827,19 @@ class DownstreamClientManager:
         if lc.breaker.state is not BreakerState.CLOSED:
             lc.state = LifecycleState.DEGRADED
 
+    def _reject_native(self, server_id: str, tool: str | None = None) -> None:
+        server = self._servers.get(server_id)
+        if server is None or server.transport is not Transport.NATIVE:
+            return
+        message = (
+            f"server '{server_id}' is an in-process handler and has no MCP session"
+        )
+        if tool is None:
+            raise DownstreamError(message)
+        raise DownstreamCallError(server_id, tool, DownstreamError(message))
+
     async def list_tools(self, server_id: str) -> list[ToolInfo]:
+        self._reject_native(server_id)
         await self.ensure_ready(server_id)
         session = self._sessions.get(server_id)
         if session is None:
@@ -871,4 +898,14 @@ class DownstreamClientManager:
             except Exception as exc:  # noqa: BLE001 — health must never raise
                 out[sid] = HealthStatus(sid, connected=False, tool_count=None,
                                         error=str(exc), lifecycle_state=label)
+        for sid, server in self._servers.items():
+            if server.transport is not Transport.NATIVE:
+                continue
+            if server_id is not None and sid != server_id:
+                continue
+            lc = self._lifecycle.get(sid)
+            label = str(lc.state) if lc is not None else None
+            out[sid] = HealthStatus(
+                sid, connected=True, tool_count=None, error=None, lifecycle_state=label
+            )
         return out

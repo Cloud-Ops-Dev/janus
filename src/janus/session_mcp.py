@@ -95,10 +95,9 @@ class McpSessionPool:
         key = f"{identity.label}:mcp:{session_id}"
         state = self._states.get(key)
         if state is None:
-            broker_identity = HostIdentity(
-                label=key, profile=identity.profile, attended=identity.attended
-            )
-            broker = self._deps.broker_for(broker_identity)
+            # ``key`` isolates audit, trifecta, and result handles. Allowlists
+            # see the authenticated principal, not this key.
+            broker = self._deps.broker_for(identity, session_id=key)
             # This exposer never mutates the serving FastMCP provider. It is used
             # only as a per-session schema/tool factory and registry.
             isolated_server: FastMCP = FastMCP(f"janus-session-{session_id}")

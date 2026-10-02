@@ -4,11 +4,12 @@ Resolution order for a :class:`PolicyContext`:
 
 1. quarantined / not-approved capability -> DENY
 2. capability not scoped for the requested env -> DENY
-3. env not permitted for the agent profile -> DENY
-4. risk tier in the profile's ``confirm`` set -> CONFIRM
-5. risk tier in the profile's ``allow`` set -> ALLOW
+3. identity not in the capability's allowlist (when one is declared) -> DENY
+4. env not permitted for the agent profile -> DENY
+5. risk tier in the profile's ``confirm`` set -> CONFIRM
+6. risk tier in the profile's ``allow`` set -> ALLOW
    (escalated to CONFIRM if the capability is flagged ``requires_confirmation``)
-6. otherwise -> DENY (deny-by-default)
+7. otherwise -> DENY (deny-by-default)
 
 Every outcome carries a human-readable reason surfaced via ``policy.explain``.
 The lethal-trifecta session guard is Phase 3 and not implemented here.
@@ -39,6 +40,13 @@ class ProfilePolicyEngine:
             return self._decide(
                 Decision.DENY,
                 f"capability not scoped for environment '{ctx.env}'",
+                cap,
+            )
+        if cap.allowed_identities and ctx.identity not in cap.allowed_identities:
+            shown = ctx.identity or "(none)"
+            return self._decide(
+                Decision.DENY,
+                f"identity '{shown}' is not permitted to use this capability",
                 cap,
             )
 

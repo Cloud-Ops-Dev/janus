@@ -89,6 +89,9 @@ def test_session_pool_binds_identity_and_expires_trifecta_state() -> None:
 
     first = pool.state_for(identity, "session-one")
     assert pool.state_for(identity, "session-one") is first
+    assert first.key == "host-a:mcp:session-one"
+    assert first.broker.policy_explain("fake.add")["identity"] == "host-a"
+    assert first.broker.policy_explain("fake.add")["decision"] == "allow"
     with pytest.raises(PermissionError, match="another identity"):
         pool.state_for(TOKENS["tok-b"], "session-one")
 

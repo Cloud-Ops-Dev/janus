@@ -13,7 +13,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/protocol-MCP-7c3aed" alt="MCP">
-  <img src="https://img.shields.io/badge/tests-108%20passing-success" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-235%20passing-success" alt="Tests">
   <img src="https://img.shields.io/badge/typing-mypy--strict-blueviolet" alt="mypy strict">
   <img src="https://img.shields.io/badge/status-Phase%201%E2%80%932%20deployed-brightgreen" alt="Status">
 </p>
@@ -142,7 +142,9 @@ bin/janus audit --limit 20
 
 Networked MCP clients connect to `http://HOST:8088/mcp/` with a bearer token
 declared in `JANUS_TOKENS`. Each `Mcp-Session-Id` receives an isolated broker,
-audit/trifecta identity, and dynamic tool view; idle session state expires after
+audit and trifecta key (`<token-label>:mcp:<session-id>`), and dynamic tool
+view. Capability allowlists compare the authenticated token label. The
+session key stays the audit and trifecta id. Idle session state expires after
 `JANUS_MCP_SESSION_TTL_SECONDS` (default: one hour). Missing or unknown tokens
 are rejected.
 
@@ -189,13 +191,17 @@ runtime via the named environment variables the credential broker resolves.
 - **Tool-poisoning resistance** — model-visible text comes from human-reviewed summaries, not raw
   downstream descriptions; a descriptor/schema change auto-quarantines the capability until it is
   re-reviewed.
+- **Public GitHub issue lookup** — `github_public.issue_get` reads one issue
+  (title, state, updated time, URL) from an explicit repository allowlist. It is
+  read-only, limited to the Janus principal `retinue`, and does not fetch arbitrary
+  URLs or mutate issues. See `docs/operations.md`.
 
 ## Development
 
 ```bash
 uv run ruff check .          # lint (includes bandit security rules)
 uv run mypy src              # strict type checking
-uv run pytest                # 108 tests
+uv run pytest                # 236 tests
 ```
 
 The substrate is the official [`modelcontextprotocol/python-sdk`](https://github.com/modelcontextprotocol/python-sdk)

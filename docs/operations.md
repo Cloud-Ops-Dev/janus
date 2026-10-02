@@ -218,6 +218,77 @@ drift is still quarantined + logged, just not pinged. Schedule periodic discover
 with a `systemd --user` timer running `bin/janus-admin discover` (Phase 4 will fold
 this into the service loop).
 
+## Public GitHub issue lookup
+
+`github_public.issue_get` is an in-process read, not an MCP downstream and not a
+general HTTP client. A call supplies `repository` (`owner/name`) and
+`issue_number`. Janus GETs exactly one resource:
+
+```text
+https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}
+```
+
+The repository must be on that capability's `repo_allowlist`. The seed list is
+`novique-ai/retinue` only. Any other repository is denied before a socket is
+opened. The request timeout is 10 seconds and redirects are not followed. No
+credential is read or sent.
+
+The result fields are `title`, `state` (`OPEN` or `CLOSED`), `updated_at`, and
+`html_url`, plus the canonical repository and issue number. The issue body is
+not returned. `404` is `not_found`, GitHub rate-limit responses (HTTP 429, or
+403 with a rate-limit signal) are `rate_limited`, and timeouts and other
+transport failures are `transport`. A non-positive or non-integer
+`issue_number` is `invalid_issue` and does not touch the network.
+
+Who may call it:
+
+| Gate | Seed |
+|---|---|
+| Identity (`allowed_identities`, the Janus token label) | `retinue` |
+| Environment | `dev`, `test`, `prod_safe` (`prod` is denied) |
+| Risk | `read_only` (the server ceiling is `read_only`, so no write can be registered) |
+| Profiles | The token's profile must already allow `read_only` in the requested environment. The Retinue deployment profile is `clay_blade_assistant`. `default_assistant` can use `dev` and `prod_safe`. It cannot use `test`. |
+
+`retinue` is the shared Retinue Janus principal (profile `clay_blade_assistant`).
+Room `obd-inbox-988cd9` has no Janus token of its own; it uses this principal,
+and so does every other Retinue room. Every room that authenticates as
+`retinue` can search, describe, and call this read-only lookup. Limiting it to
+one room would require a separate Janus identity for that room. This seed does
+not add that integration.
+
+An MCP session's audit key is `<token-label>:mcp:<session-id>` (for this
+principal, `retinue:mcp:<session-id>`). Allowlists match the authenticated
+token label, which the session carries as its own field beside that key. REST
+uses the token label as both the principal and the audit key. A REST or MCP
+caller whose label is `retinue` is allowed; every other label is denied.
+
+Other principals do not see the capability in `capability_search`. `policy_explain`
+reports the deny. The sandbox entry in `JANUS_TOKENS` is
+`token=retinue:clay_blade_assistant`. There is no new endpoint environment variable.
+
+There is no issue create, update, comment, or close capability, and no host
+HTTP broker. Descriptor discovery does not crawl this server: the schema is
+the reviewed handler, not a downstream tool list, so a crawl must not mark
+the capability missing.
+
+Live check after deploy, as that identity, with `env` set to `dev` or
+`prod_safe`:
+
+```text
+capability_search  query="public github issue"
+capability_describe github_public.issue_get
+capability_call github_public.issue_get
+  {"repository":"novique-ai/retinue","issue_number":253}
+capability_call github_public.issue_get
+  {"repository":"novique-ai/retinue","issue_number":234}
+```
+
+`253` is expected `OPEN` and `234` is expected `CLOSED`, each with title,
+`updated_at`, and `html_url`. A call for any other `owner/name` must be denied
+with `error_code` `repo_denied` and must not contact GitHub. Search and call as
+any other token label must be denied. `server_list` must not show a GitHub
+write tool.
+
 ## Audit
 
 Every brokered call (allow/confirm/deny) is one row in `data/janus.db`
