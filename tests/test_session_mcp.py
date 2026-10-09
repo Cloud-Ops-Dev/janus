@@ -114,6 +114,22 @@ def test_session_pool_rejects_nonpositive_ttl() -> None:
         McpSessionPool(_deps(), ttl_seconds=0)
 
 
+def test_room_binding_keeps_identity_owner_after_session_state_expires() -> None:
+    now = [0.0]
+    pool = McpSessionPool(_deps(), ttl_seconds=10, clock=lambda: now[0])
+    identity = TOKENS["tok-a"]
+    first = pool.state_for(identity, "room-session")
+    pool._apply_room_binding(first, "A" * 43)
+
+    now[0] = 10.0
+    pool.state_for(identity, "other-session")
+    with pytest.raises(PermissionError, match="another identity"):
+        pool.state_for(TOKENS["tok-b"], "room-session")
+    resumed = pool.state_for(identity, "room-session")
+    pool._apply_room_binding(resumed, None)
+    assert resumed.room_binding == "A" * 43
+
+
 async def _wait_started(server: uvicorn.Server) -> None:
     for _ in range(200):
         if server.started:

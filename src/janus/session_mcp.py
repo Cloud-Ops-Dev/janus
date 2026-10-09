@@ -211,7 +211,11 @@ class McpSessionPool:
         stale = [key for key, state in self._states.items() if now - state.last_seen >= self._ttl]
         for key in stale:
             state = self._states.pop(key)
-            self._owners.pop(state.session_id, None)
+            # A room claim survives the state TTL. Keep its identity owner as
+            # well, or a different identity could reuse this session id and
+            # inherit the retired room claim without presenting the header.
+            if state.session_id not in self._session_bindings:
+                self._owners.pop(state.session_id, None)
             if self._deps.trifecta is not None:
                 self._deps.trifecta.clear_session(state.key)
 
