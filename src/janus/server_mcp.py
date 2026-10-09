@@ -65,9 +65,7 @@ def build_mcp_server(
             return {"error": str(exc)}
 
     @mcp.tool
-    async def capability_describe(
-        capability_id: str, env: str | None = None
-    ) -> dict[str, Any]:
+    async def capability_describe(capability_id: str, env: str | None = None) -> dict[str, Any]:
         """Describe one capability: its input schema (fetched on demand), risk
         tier, and the policy decision for the current session/environment."""
         try:
@@ -82,13 +80,23 @@ def build_mcp_server(
         reason: str,
         env: str | None = None,
         confirm: bool = False,
+        approval_request_id: str | None = None,
     ) -> dict[str, Any]:
         """Invoke a capability. The call is policy-checked and audited. `reason`
-        is your stated intent (recorded). Write/prod-like calls may be denied or
-        return needs_confirmation — re-call with confirm=true to proceed."""
+        is your stated intent (recorded). Some calls are denied. Others return
+        needs_confirmation with a preview. If that response includes
+        approval_request_id, confirm=true does not authorize the call: retry the
+        same capability, arguments, environment, and reason with that
+        approval_request_id once an operator has approved it. Otherwise re-call
+        with confirm=true to proceed."""
         try:
             return await broker.capability_call(
-                capability_id, arguments, reason, _parse_env(env), confirmed=confirm
+                capability_id,
+                arguments,
+                reason,
+                _parse_env(env),
+                confirmed=confirm,
+                approval_request_id=approval_request_id,
             )
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
@@ -110,9 +118,7 @@ def build_mcp_server(
         return await broker.server_health(server_id)
 
     @mcp.tool
-    async def policy_explain(
-        capability_id: str, env: str | None = None
-    ) -> dict[str, Any]:
+    async def policy_explain(capability_id: str, env: str | None = None) -> dict[str, Any]:
         """Explain why a capability is allowed, denied, or needs confirmation in
         the given environment for the current session profile."""
         try:

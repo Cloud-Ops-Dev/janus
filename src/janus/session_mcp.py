@@ -14,6 +14,7 @@ from fastmcp.server.dependencies import get_access_token, get_context
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.tools.tool import Tool, ToolResult
 
+from janus.approval import ApprovalMode
 from janus.broker import Broker
 from janus.exposure import DynamicToolExposer
 from janus.registry.registry import EnvScope
@@ -40,6 +41,7 @@ class JanusTokenVerifier(TokenVerifier):
                 "janus_label": identity.label,
                 "janus_profile": identity.profile,
                 "janus_attended": identity.attended,
+                "janus_approval_mode": identity.approval_mode.value,
             },
         )
 
@@ -79,10 +81,17 @@ class McpSessionPool:
             raise PermissionError("authenticated Janus identity is required")
         claims = token.claims or {}
         label = str(claims.get("janus_label") or token.client_id)
+        raw_mode = claims.get("janus_approval_mode", ApprovalMode.LEGACY.value)
+        if not isinstance(raw_mode, str) or raw_mode not in {
+            ApprovalMode.LEGACY.value,
+            ApprovalMode.ROOM_APPROVAL.value,
+        }:
+            raise PermissionError("unknown Janus approval mode")
         return HostIdentity(
             label=label,
             profile=str(claims.get("janus_profile") or "default_assistant"),
             attended=bool(claims.get("janus_attended", True)),
+            approval_mode=ApprovalMode(raw_mode),
         )
 
     def state_for(self, identity: HostIdentity, session_id: str) -> SessionState:
@@ -221,7 +230,15 @@ def build_session_mcp_server(
         reason: str,
         env: str | None = None,
         confirm: bool = False,
+        approval_request_id: str | None = None,
     ) -> dict[str, Any]:
+        """Invoke a capability. The call is policy-checked and audited. `reason`
+        is your stated intent (recorded). Some calls are denied. Others return
+        needs_confirmation with a preview. If that response includes
+        approval_request_id, confirm=true does not authorize the call: retry the
+        same capability, arguments, environment, and reason with that
+        approval_request_id once an operator has approved it. Otherwise re-call
+        with confirm=true to proceed."""
         try:
             return await current().broker.capability_call(
                 capability_id,
@@ -229,6 +246,7 @@ def build_session_mcp_server(
                 reason,
                 _parse_env(env),
                 confirmed=confirm,
+                approval_request_id=approval_request_id,
             )
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}

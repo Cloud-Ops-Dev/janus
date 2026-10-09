@@ -17,6 +17,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from janus.approval import ApprovalFailure, ApprovalMode, ApprovalStore
 from janus.audit.types import AuditEntry, AuditSink
 from janus.discovery.alerts import Alerter, NullAlerter
 from janus.downstream.client_manager import (
@@ -72,6 +73,8 @@ class Broker:
         default_env: EnvScope = EnvScope.PROD_SAFE,
         clock: Clock | None = None,
         issue_lookup: GithubIssueLookup | None = None,
+        approval_mode: ApprovalMode = ApprovalMode.LEGACY,
+        approvals: ApprovalStore | None = None,
     ) -> None:
         self._registry = registry
         self._manager = manager
@@ -97,6 +100,10 @@ class Broker:
         self._default_env = default_env
         self._clock: Clock = clock or (lambda: datetime.now(UTC))
         self._issue_lookup = issue_lookup or GithubIssueLookup()
+        # room_approval never treats the model confirm bit as authorization.
+        # The store is process-local and shared across this identity's brokers.
+        self._approval_mode = approval_mode
+        self._approvals = approvals
 
     # -- helpers ------------------------------------------------------------ #
     def _effective_flags(self, cap: Capability) -> tuple[bool, bool]:
@@ -256,9 +263,7 @@ class Broker:
         else:
             try:
                 tools = await self._manager.list_tools(cap.server_id)
-                match = next(
-                    (t for t in tools if t.name == cap.downstream_tool_name), None
-                )
+                match = next((t for t in tools if t.name == cap.downstream_tool_name), None)
                 input_schema = match.input_schema if match is not None else None
                 if match is None:
                     schema_error = "downstream tool not found"
@@ -292,12 +297,14 @@ class Broker:
         env: EnvScope | None = None,
         *,
         confirmed: bool = False,
+        approval_request_id: str | None = None,
     ) -> dict[str, Any]:
         """Policy-checked, audited invocation of one capability.
 
-        ``confirmed=True`` (set by the REST/CLI path after a human approves)
-        lets a CONFIRM-tier call execute. It is ignored for unattended sessions,
-        which always hard-deny confirm-tier actions.
+        ``confirmed=True`` lets a legacy CONFIRM-tier call execute. It is
+        ignored for unattended sessions, which always hard-deny confirm-tier
+        actions, and it is never authorization for a ``room_approval`` identity.
+        That identity executes a gated call only with an operator grant id.
         """
         arguments = arguments or {}
         arg_keys = sorted(arguments)
@@ -353,6 +360,7 @@ class Broker:
                     }
                 confirm_tier = True  # attended -> require explicit confirmation
 
+        granted = False
         if confirm_tier:
             if not self._attended:
                 # Locked operator decision (2026-06-16): unattended confirm-tier
@@ -360,7 +368,23 @@ class Broker:
                 hard = f"unattended session: confirm-tier hard-denied ({decision.reason})"
                 self._audit_record(cap, env, "deny", "blocked", hard, arg_keys)
                 return {"status": "denied", "capability_id": cap.id, "reason": hard}
-            if not confirmed:
+            if self._approval_mode is ApprovalMode.ROOM_APPROVAL:
+                # The model confirm bit is ignored. A grant id is required.
+                blocked = self._room_approval_gate(
+                    cap,
+                    server,
+                    env,
+                    arguments,
+                    reason,
+                    arg_keys,
+                    confirm_reason,
+                    trifecta_gated,
+                    approval_request_id,
+                )
+                if blocked is not None:
+                    return blocked
+                granted = True
+            elif not confirmed:
                 # Surface a confirmation requirement for the caller (REST/CLI, or
                 # an MCP client that re-calls with confirm) to satisfy.
                 self._audit_record(
@@ -374,7 +398,13 @@ class Broker:
                     "preview": self._preview(cap, server, env, arg_keys, trifecta_gated),
                 }
 
-        # ALLOW (or confirmed CONFIRM) — execute downstream.
+        # Legacy stores the model confirm bit, including on allow-tier calls.
+        # room_approval stores a bit only after a grant for this call is consumed.
+        stored_confirmed = (
+            granted if self._approval_mode is ApprovalMode.ROOM_APPROVAL else confirmed
+        )
+
+        # ALLOW (or authorized CONFIRM) — execute downstream.
         audit_decision = "confirm" if confirm_tier else "allow"
         started = self._clock()
         try:
@@ -387,18 +417,14 @@ class Broker:
         except IssueLookupError as exc:
             latency = self._elapsed_ms(started)
             if exc.denied:
-                self._audit_record(
-                    cap, env, "deny", "blocked", str(exc), arg_keys, latency
-                )
+                self._audit_record(cap, env, "deny", "blocked", str(exc), arg_keys, latency)
                 return {
                     "status": "denied",
                     "capability_id": cap.id,
                     "reason": str(exc),
                     "error_code": exc.code,
                 }
-            self._audit_record(
-                cap, env, audit_decision, "error", str(exc), arg_keys, latency
-            )
+            self._audit_record(cap, env, audit_decision, "error", str(exc), arg_keys, latency)
             return {
                 "status": "error",
                 "capability_id": cap.id,
@@ -407,17 +433,19 @@ class Broker:
             }
         except DownstreamError as exc:
             latency = self._elapsed_ms(started)
-            self._audit_record(
-                cap, env, audit_decision, "error", str(exc), arg_keys, latency
-            )
+            self._audit_record(cap, env, audit_decision, "error", str(exc), arg_keys, latency)
             return {"status": "error", "capability_id": cap.id, "error": str(exc)}
 
         truncation = None
         if isinstance(self._sanitizer, OutputSanitizer):
             try:
                 result, truncation = self._sanitizer.sanitize_for_call(
-                    result, trust_level=server.trust_level, owner=self._session_id,
-                    capability_id=cap.id, env=str(env), confirmed=confirmed,
+                    result,
+                    trust_level=server.trust_level,
+                    owner=self._session_id,
+                    capability_id=cap.id,
+                    env=str(env),
+                    confirmed=stored_confirmed,
                 )
             except ValueError as exc:
                 self._audit_record(cap, env, audit_decision, "error", reason, arg_keys)
@@ -454,6 +482,9 @@ class Broker:
             return {"status": "denied", "error": "capability is no longer callable"}
         env = EnvScope(entry.env)
         decision = self._policy.evaluate(self._context(cap, env))
+        # entry.confirmed is the model confirm bit for legacy identities and a
+        # consumed operator grant for room_approval. The room bit is never copied
+        # from confirm=true.
         if decision.decision is Decision.DENY or (
             decision.decision is Decision.CONFIRM and not (entry.confirmed and self._attended)
         ):
@@ -463,6 +494,161 @@ class Broker:
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
         return {"status": "ok", "text": text, "truncation": truncation}
+
+    def _room_approval_gate(
+        self,
+        cap: Capability,
+        server: Server,
+        env: EnvScope,
+        arguments: dict[str, Any],
+        reason: str,
+        arg_keys: list[str],
+        confirm_reason: str,
+        trifecta_gated: bool,
+        approval_request_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Return a non-executing response, or None after a grant is consumed.
+
+        None means current policy and the trifecta guard were evaluated again
+        after the consume and still allow this exact call to proceed.
+        """
+        if not isinstance(arguments, dict) or not isinstance(reason, str):
+            return {
+                "status": "error",
+                "capability_id": cap.id,
+                "error": "arguments must be a JSON object and reason a string",
+            }
+        if self._approvals is None:
+            self._audit_record(cap, env, "deny", "blocked", "approval store unavailable", arg_keys)
+            return {
+                "status": "denied",
+                "capability_id": cap.id,
+                "reason": "approval store unavailable",
+            }
+
+        presented: str | None
+        if approval_request_id is None or (
+            isinstance(approval_request_id, str) and not approval_request_id.strip()
+        ):
+            presented = None
+        elif not isinstance(approval_request_id, str):
+            self._audit_record(cap, env, "deny", "blocked", "approval unknown", arg_keys)
+            return {
+                "status": "denied",
+                "capability_id": cap.id,
+                "reason": "approval unknown",
+            }
+        else:
+            presented = approval_request_id.strip()
+
+        if presented is None:
+            try:
+                new_id = self._approvals.issue(
+                    identity=self._identity,
+                    profile=self._profile,
+                    session_id=self._session_id,
+                    capability_id=cap.id,
+                    server_id=cap.server_id,
+                    tool_name=cap.downstream_tool_name,
+                    env=str(env),
+                    arguments=arguments,
+                    reason=reason,
+                    gate_reason=confirm_reason,
+                    trifecta=trifecta_gated,
+                )
+            except ValueError:
+                return {
+                    "status": "error",
+                    "capability_id": cap.id,
+                    "error": "arguments are not canonical JSON",
+                }
+            self._audit_record(cap, env, "confirm", "needs_confirmation", confirm_reason, arg_keys)
+            return self._needs_approval(
+                cap, server, env, arg_keys, confirm_reason, trifecta_gated, new_id
+            )
+
+        outcome = self._approvals.consume(
+            presented,
+            identity=self._identity,
+            profile=self._profile,
+            session_id=self._session_id,
+            capability_id=cap.id,
+            server_id=cap.server_id,
+            tool_name=cap.downstream_tool_name,
+            env=str(env),
+            arguments=arguments,
+            reason=reason,
+        )
+        if not outcome.ok:
+            failure = outcome.failure or ApprovalFailure.UNKNOWN
+            if failure is ApprovalFailure.PENDING:
+                self._audit_record(
+                    cap, env, "confirm", "needs_confirmation", confirm_reason, arg_keys
+                )
+                return self._needs_approval(
+                    cap, server, env, arg_keys, confirm_reason, trifecta_gated, presented
+                )
+            self._audit_record(cap, env, "deny", "blocked", f"approval {failure.value}", arg_keys)
+            return {
+                "status": "denied",
+                "capability_id": cap.id,
+                "reason": f"approval {failure.value}",
+                "approval_request_id": presented,
+            }
+
+        # Consumed. Re-read live policy and the guard before any downstream I/O.
+        callable_, state = self._live_callable(cap)
+        if not callable_:
+            self._audit_record(cap, env, "deny", "blocked", state, arg_keys)
+            return {
+                "status": "denied",
+                "capability_id": cap.id,
+                "reason": f"capability is {state}",
+            }
+        decision = self._policy.evaluate(self._context(cap, env))
+        if decision.decision is Decision.DENY:
+            self._audit_record(cap, env, "deny", "blocked", decision.reason, arg_keys)
+            return {
+                "status": "denied",
+                "capability_id": cap.id,
+                "reason": decision.reason,
+            }
+        if self._trifecta is not None:
+            assessment = self._trifecta.assess(self._session_id, cap, server)
+            if assessment.gated and not self._attended:
+                hard = f"unattended session: {assessment.reason}"
+                self._audit_record(cap, env, "deny", "blocked", hard, arg_keys)
+                return {
+                    "status": "denied",
+                    "capability_id": cap.id,
+                    "reason": hard,
+                    "trifecta": True,
+                }
+        if decision.decision is Decision.CONFIRM and not self._attended:
+            hard = f"unattended session: confirm-tier hard-denied ({decision.reason})"
+            self._audit_record(cap, env, "deny", "blocked", hard, arg_keys)
+            return {"status": "denied", "capability_id": cap.id, "reason": hard}
+        return None
+
+    def _needs_approval(
+        self,
+        cap: Capability,
+        server: Server,
+        env: EnvScope,
+        arg_keys: list[str],
+        confirm_reason: str,
+        trifecta_gated: bool,
+        approval_request_id: str,
+    ) -> dict[str, Any]:
+        # Preview carries argument keys only. Values stay on the operator grant.
+        return {
+            "status": "needs_confirmation",
+            "capability_id": cap.id,
+            "reason": confirm_reason,
+            "trifecta": trifecta_gated,
+            "preview": self._preview(cap, server, env, arg_keys, trifecta_gated),
+            "approval_request_id": approval_request_id,
+        }
 
     def _elapsed_ms(self, started: datetime) -> float:
         return (self._clock() - started).total_seconds() * 1000.0
@@ -529,9 +715,7 @@ class Broker:
                     "server_id": sid,
                     "connected": status.connected,
                     "tool_count": status.tool_count,
-                    "capability_count": len(
-                        self._registry.capabilities_for_server(sid)
-                    ),
+                    "capability_count": len(self._registry.capabilities_for_server(sid)),
                     "lifecycle_state": status.lifecycle_state,
                     "error": status.error,
                 }
@@ -539,9 +723,7 @@ class Broker:
         return {"count": len(rows), "servers": rows}
 
     # -- 6. policy_explain ------------------------------------------------- #
-    def policy_explain(
-        self, capability_id: str, env: EnvScope | None = None
-    ) -> dict[str, Any]:
+    def policy_explain(self, capability_id: str, env: EnvScope | None = None) -> dict[str, Any]:
         cap = self._registry.capabilities.get(capability_id)
         if cap is None:
             return {"error": f"unknown capability '{capability_id}'"}

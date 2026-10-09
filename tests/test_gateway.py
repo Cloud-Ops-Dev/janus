@@ -20,6 +20,7 @@ from mcp import StdioServerParameters
 from mcp.client.session_group import ClientSessionGroup
 from mcp.types import CallToolResult, TextContent
 
+from janus.approval import ApprovalMode
 from janus.gateway import Gateway, GatewayConfig, check_environment, parse_tokens
 from janus.registry import EnvScope, load_registry
 
@@ -79,8 +80,62 @@ def test_parse_tokens() -> None:
     tokens = parse_tokens({"JANUS_TOKENS": "ta=host-a:infra_operator;tb=host-b"})
     assert tokens["ta"].label == "host-a"
     assert tokens["ta"].profile == "infra_operator"
+    assert tokens["ta"].approval_mode is ApprovalMode.LEGACY
     assert tokens["tb"].label == "host-b"
     assert tokens["tb"].profile == "default_assistant"
+    assert tokens["tb"].approval_mode is ApprovalMode.LEGACY
+
+
+def test_parse_room_approval_mode() -> None:
+    tokens = parse_tokens(
+        {"JANUS_TOKENS": "ta=room:default_assistant:room_approval;tb=host-b:infra_operator"}
+    )
+    assert tokens["ta"].label == "room"
+    assert tokens["ta"].profile == "default_assistant"
+    assert tokens["ta"].approval_mode is ApprovalMode.ROOM_APPROVAL
+    assert tokens["tb"].approval_mode is ApprovalMode.LEGACY
+
+
+def test_parse_rejects_unknown_approval_mode_without_echoing_bearer() -> None:
+    bearer = "synthetic-bearer-value"
+    with pytest.raises(ValueError, match="room_approval") as caught:
+        parse_tokens({"JANUS_TOKENS": f"{bearer}=room:default_assistant:self_confirm"})
+    assert bearer not in str(caught.value)
+
+
+def test_room_approval_requires_distinct_operator_token(tmp_path: Path) -> None:
+    config = GatewayConfig(config_dir=_write_stdio_config(tmp_path), data_dir=tmp_path / "data")
+    room = {"JANUS_TOKENS": "synthetic-room=room:default_assistant:room_approval"}
+    missing = check_environment(config, room)
+    assert any("JANUS_APPROVAL_TOKEN is required" in problem for problem in missing)
+
+    collided = check_environment(
+        config,
+        {
+            "JANUS_TOKENS": "synthetic-shared=room:default_assistant:room_approval",
+            "JANUS_APPROVAL_TOKEN": "synthetic-shared",
+        },
+    )
+    assert any("distinct" in problem for problem in collided)
+
+    with pytest.raises(RuntimeError, match="JANUS_APPROVAL_TOKEN is required"):
+        Gateway.build(config, environ=room)
+
+    ready = {
+        "JANUS_TOKENS": "synthetic-room=room:default_assistant:room_approval",
+        "JANUS_APPROVAL_TOKEN": "synthetic-operator",
+    }
+    assert check_environment(config, ready) == []
+
+    async def body() -> None:
+        gateway = Gateway.build(config, environ=ready)
+        try:
+            assert gateway.tokens["synthetic-room"].approval_mode is ApprovalMode.ROOM_APPROVAL
+            assert gateway.approval_token == "synthetic-operator"  # noqa: S105
+        finally:
+            await gateway.aclose()
+
+    asyncio.run(body())
 
 
 def test_check_environment_flags_missing(tmp_path: Path) -> None:
@@ -92,9 +147,7 @@ def test_check_environment_flags_missing(tmp_path: Path) -> None:
 
 
 def test_check_environment_ok_for_stdio(tmp_path: Path) -> None:
-    config = GatewayConfig(
-        config_dir=_write_stdio_config(tmp_path), data_dir=tmp_path / "data"
-    )
+    config = GatewayConfig(config_dir=_write_stdio_config(tmp_path), data_dir=tmp_path / "data")
     problems = check_environment(config, {"JANUS_TOKENS": "t=h:default_assistant"})
     assert problems == []
 
@@ -111,8 +164,7 @@ def test_auto_expose_config_parsing() -> None:
 
 def test_mcp_session_ttl_config() -> None:
     assert (
-        GatewayConfig.from_env({"JANUS_MCP_SESSION_TTL_SECONDS": "90"})
-        .mcp_session_ttl_seconds
+        GatewayConfig.from_env({"JANUS_MCP_SESSION_TTL_SECONDS": "90"}).mcp_session_ttl_seconds
         == 90
     )
     with pytest.raises(ValueError, match="greater than zero"):
@@ -171,9 +223,7 @@ def test_end_to_end_stdio_phase1_acceptance(tmp_path: Path) -> None:
         "JANUS_MCP_PROFILE": "default_assistant",
         "JANUS_TOKENS": "t=h:default_assistant",
     }
-    params = StdioServerParameters(
-        command=sys.executable, args=["-m", "janus", "--stdio"], env=env
-    )
+    params = StdioServerParameters(command=sys.executable, args=["-m", "janus", "--stdio"], env=env)
 
     async def body() -> None:
         async with ClientSessionGroup() as group:
@@ -196,8 +246,7 @@ def test_end_to_end_stdio_phase1_acceptance(tmp_path: Path) -> None:
             called = _payload(
                 await session.call_tool(
                     "capability_call",
-                    {"capability_id": "fake.add", "arguments": {"a": 2, "b": 3},
-                     "reason": "e2e"},
+                    {"capability_id": "fake.add", "arguments": {"a": 2, "b": 3}, "reason": "e2e"},
                 )
             )
             assert called["status"] == "ok"
@@ -223,9 +272,7 @@ def test_end_to_end_stdio_auto_expose(tmp_path: Path) -> None:
         "JANUS_TOKENS": "t=h:default_assistant",
         "JANUS_AUTO_EXPOSE": "fake.add",
     }
-    params = StdioServerParameters(
-        command=sys.executable, args=["-m", "janus", "--stdio"], env=env
-    )
+    params = StdioServerParameters(command=sys.executable, args=["-m", "janus", "--stdio"], env=env)
 
     async def body() -> None:
         async with ClientSessionGroup() as group:

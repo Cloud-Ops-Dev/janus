@@ -24,6 +24,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from janus.approval import ApprovalMode, ApprovalStore
 from janus.audit.audit_log import SqliteAuditLog
 from janus.discovery.alerts import build_alerter
 from janus.downstream.client_manager import DownstreamClientManager
@@ -78,13 +79,9 @@ class GatewayConfig:
         env = environ if environ is not None else os.environ
         root = Path(env.get("JANUS_HOME", str(_REPO_ROOT)))
         auto_expose = tuple(
-            item.strip()
-            for item in env.get("JANUS_AUTO_EXPOSE", "").split(",")
-            if item.strip()
+            item.strip() for item in env.get("JANUS_AUTO_EXPOSE", "").split(",") if item.strip()
         )
-        mcp_session_ttl_seconds = float(
-            env.get("JANUS_MCP_SESSION_TTL_SECONDS", "3600")
-        )
+        mcp_session_ttl_seconds = float(env.get("JANUS_MCP_SESSION_TTL_SECONDS", "3600"))
         if mcp_session_ttl_seconds <= 0:
             raise ValueError("JANUS_MCP_SESSION_TTL_SECONDS must be greater than zero")
         return cls(
@@ -104,9 +101,12 @@ class GatewayConfig:
 
 
 def parse_tokens(environ: Mapping[str, str]) -> dict[str, HostIdentity]:
-    """Parse ``JANUS_TOKENS`` (``token=label:profile;...``) into host identities.
+    """Parse ``JANUS_TOKENS`` into host identities.
 
-    Tokens come from the environment / op refs — never committed.
+    Each entry is ``token=label:profile`` or ``token=label:profile:room_approval``.
+    Two-part entries stay on the legacy confirm bit. The third field is accepted
+    only when it is exactly ``room_approval``. The error text never includes the
+    token value.
     """
     raw = environ.get("JANUS_TOKENS", "")
     tokens: dict[str, HostIdentity] = {}
@@ -114,14 +114,59 @@ def parse_tokens(environ: Mapping[str, str]) -> dict[str, HostIdentity]:
         if not part:
             continue
         if "=" not in part:
-            raise ValueError(f"invalid JANUS_TOKENS entry (need token=label:profile): {part}")
+            raise ValueError(
+                "invalid JANUS_TOKENS entry "
+                "(need token=label:profile or token=label:profile:room_approval)"
+            )
         token, spec = part.split("=", 1)
-        label, _, profile = spec.partition(":")
+        fields = [field.strip() for field in spec.split(":")]
+        if len(fields) == 1:
+            label, profile, mode = fields[0], "default_assistant", ApprovalMode.LEGACY
+        elif len(fields) == 2:
+            label, profile = fields
+            mode = ApprovalMode.LEGACY
+        elif len(fields) == 3:
+            label, profile, mode_raw = fields
+            if mode_raw != ApprovalMode.ROOM_APPROVAL.value:
+                raise ValueError(
+                    "invalid JANUS_TOKENS approval mode (only room_approval is supported)"
+                )
+            mode = ApprovalMode.ROOM_APPROVAL
+        else:
+            raise ValueError(
+                "invalid JANUS_TOKENS entry "
+                "(need token=label:profile or token=label:profile:room_approval)"
+            )
         tokens[token.strip()] = HostIdentity(
             label=label.strip() or token.strip(),
             profile=profile.strip() or "default_assistant",
+            approval_mode=mode,
         )
     return tokens
+
+
+def approval_token_from_env(environ: Mapping[str, str]) -> str | None:
+    """Return the operator bearer, or None when it is unset or blank."""
+    raw = environ.get("JANUS_APPROVAL_TOKEN", "").strip()
+    return raw or None
+
+
+def approval_configuration_problem(
+    tokens: Mapping[str, HostIdentity], approval_token: str | None
+) -> str | None:
+    """Startup problem for room-approval configuration, if any.
+
+    A room identity without a distinct operator bearer would either fail open
+    or let the room call the approval API with its own Janus credential.
+    """
+    needs_operator = any(
+        identity.approval_mode is ApprovalMode.ROOM_APPROVAL for identity in tokens.values()
+    )
+    if needs_operator and not approval_token:
+        return "JANUS_APPROVAL_TOKEN is required when a room_approval identity is configured"
+    if approval_token is not None and approval_token in tokens:
+        return "JANUS_APPROVAL_TOKEN must be distinct from every JANUS_TOKENS credential"
+    return None
 
 
 def check_environment(config: GatewayConfig, environ: Mapping[str, str]) -> list[str]:
@@ -153,8 +198,17 @@ def check_environment(config: GatewayConfig, environ: Mapping[str, str]) -> list
                 )
     if needs_op and not environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
         problems.append("op:// secret refs declared but OP_SERVICE_ACCOUNT_TOKEN is unset")
-    if not parse_tokens(environ):
-        problems.append("JANUS_TOKENS is unset — the REST API would have no authorized hosts")
+    try:
+        tokens = parse_tokens(environ)
+    except ValueError as exc:
+        problems.append(str(exc))
+    else:
+        if not tokens:
+            problems.append("JANUS_TOKENS is unset — the REST API would have no authorized hosts")
+        else:
+            problem = approval_configuration_problem(tokens, approval_token_from_env(environ))
+            if problem:
+                problems.append(problem)
     return problems
 
 
@@ -166,11 +220,18 @@ class Gateway:
     tokens: dict[str, HostIdentity]
     store: SchemaStore
     _audit: SqliteAuditLog
+    # Operator bearer. Never a Janus host token, and never repr'd.
+    approval_token: str | None = field(default=None, repr=False)
     _connected: bool = field(default=False)
 
     @classmethod
     def build(cls, config: GatewayConfig, environ: Mapping[str, str] | None = None) -> Gateway:
         env = dict(environ if environ is not None else os.environ)
+        tokens = parse_tokens(env)
+        approval_token = approval_token_from_env(env)
+        problem = approval_configuration_problem(tokens, approval_token)
+        if problem:
+            raise RuntimeError(problem)
         registry = load_registry(config.config_dir)
 
         profiles_path = config.config_dir / "profiles.yaml"
@@ -201,14 +262,16 @@ class Gateway:
             alerter=build_alerter(env),
             ranker=ranker,
             default_env=config.default_env,
+            approvals=ApprovalStore(),
         )
         return cls(
             config=config,
             manager=manager,
             deps=deps,
-            tokens=parse_tokens(env),
+            tokens=tokens,
             store=store,
             _audit=audit,
+            approval_token=approval_token,
         )
 
     async def connect(self) -> list[str]:
@@ -224,12 +287,15 @@ class Gateway:
         self._audit.close()
 
     def rest_app(self, lifespan: object | None = None) -> FastAPI:
-        return create_rest_app(self.deps, self.tokens, lifespan=lifespan)  # type: ignore[arg-type]
+        return create_rest_app(
+            self.deps,
+            self.tokens,
+            lifespan=lifespan,  # type: ignore[arg-type]
+            approval_token=self.approval_token,
+        )
 
     def mcp_server(self) -> tuple[Any, DynamicToolExposer | None]:
-        identity = HostIdentity(
-            label=self.config.mcp_session, profile=self.config.mcp_profile
-        )
+        identity = HostIdentity(label=self.config.mcp_session, profile=self.config.mcp_profile)
         return build_mcp_server(self.deps.broker_for(identity))
 
     def session_mcp_server(self) -> tuple[Any, McpSessionPool]:
@@ -302,9 +368,7 @@ async def serve_rest(config: GatewayConfig) -> None:
         if config.idle_after_seconds > 0:
             background.append(
                 asyncio.create_task(
-                    gateway.manager.run_idle_reaper(
-                        interval=config.reaper_interval_seconds
-                    ),
+                    gateway.manager.run_idle_reaper(interval=config.reaper_interval_seconds),
                     name="janus-idle-reaper",
                 )
             )

@@ -188,6 +188,11 @@ runtime via the named environment variables the credential broker resolves.
   downstream and the sanitizer redacts them on the way back. This is asserted by tests.
 - **Deny-by-default** — a capability is uncallable until it is approved, and any risk tier above a
   profile's allowance is denied or gated behind confirmation, with `policy.explain` giving the reason.
+- **Room identities do not self-confirm.** A `JANUS_TOKENS` entry ending in
+  `:room_approval` cannot authorize a confirm-tier or lethal-trifecta call with
+  `confirm=true`. The call runs once only after a separate operator bearer
+  approves that exact request. The approval routes are not MCP tools. See
+  `docs/operations.md`.
 - **Tool-poisoning resistance** — model-visible text comes from human-reviewed summaries, not raw
   downstream descriptions; a descriptor/schema change auto-quarantines the capability until it is
   re-reviewed.

@@ -121,6 +121,41 @@ remote 503 take six healthy local downstreams offline. Do not reintroduce an
 Cut over per host once a host answers read questions through Janus reliably;
 keep the direct MCP configs as documented break-glass.
 
+## Room approval
+
+A `JANUS_TOKENS` entry is `token=label:profile` or
+`token=label:profile:room_approval`. Two-part entries keep today's confirm bit:
+an attended caller may retry a confirm-tier or trifecta-gated call with
+`confirm=true`.
+
+`room_approval` is for a Retinue room identity. `confirm=true` is not
+authorization, including when the call also carries an approval id that is
+still pending. Every gated call returns `needs_confirmation`, a new
+`approval_request_id`, and the existing preview (argument **keys** only).
+The grant is bound to the identity, profile, session, capability, server,
+downstream tool, environment, canonical JSON arguments, and reason. It lives
+in process memory for 15 minutes. A restart drops it, and an expired, denied,
+mismatched, pending, or already-consumed id does not execute. The grant is
+consumed before the downstream call, then policy and the trifecta guard are
+evaluated again.
+
+The room does not receive a callback. The operator client — not the room —
+uses a separate bearer, `JANUS_APPROVAL_TOKEN`. That value is required at
+startup when any identity is `room_approval`, and it must not be one of the
+`JANUS_TOKENS` credentials. Host and room bearers get 401 on these routes:
+
+```text
+GET  /v1/approvals/{id}
+POST /v1/approvals/{id}/decision    {"decision": "approve"} or {"decision": "deny"}
+```
+
+`GET` returns the authoritative status and the exact arguments so the operator
+can see the call. The model-facing `capability_call` result does not include
+those values, and neither does the audit log. After `approve`, the room retries
+the same call with `approval_request_id`. A `deny` before the grant is consumed
+revokes an approval. A denied grant cannot be approved later. There is no list
+endpoint and no MCP tool for this API.
+
 ### Exposed-tool naming — `JANUS_EXPOSED_SEPARATOR` (per-client)
 
 Auto-exposed capabilities (`JANUS_AUTO_EXPOSE`) are surfaced as native tools
