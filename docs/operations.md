@@ -139,6 +139,20 @@ mismatched, pending, or already-consumed id does not execute. The grant is
 consumed before the downstream call, then policy and the trifecta guard are
 evaluated again.
 
+A Grok Build room can also carry an origin claim. The trusted gateway mints
+`secrets.token_urlsafe(32)` — 43 characters from `A-Za-z0-9_-`, no padding —
+and sends it as the MCP HTTP header `X-Retinue-Room-Binding`. Janus reads
+that header from the authenticated MCP request and pins the first accepted
+value to the MCP session. A different value on that session, or the same
+value on another session, is rejected. Tool arguments, model prose, and the
+REST call body cannot set it. The header value is stored on the grant and
+returned only by the operator GET and decision responses, as `room_binding`.
+It is not included in the member-facing `capability_call` result, the
+preview, the audit log, or Janus logs, and a rejection does not echo it. A
+missing header leaves `room_binding` null so an in-process Hermes or Claude
+turn can still be bound by its gateway from the trusted tool result. Legacy
+identities ignore the header.
+
 The room does not receive a callback. The operator client — not the room —
 uses a separate bearer, `JANUS_APPROVAL_TOKEN`. That value is required at
 startup when any identity is `room_approval`, and it must not be one of the

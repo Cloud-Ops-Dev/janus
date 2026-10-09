@@ -41,12 +41,28 @@ from janus.registry.registry import (
     Server,
 )
 from janus.registry.schema_store import CapabilityStateProvider
+from janus.room_binding import (
+    MALFORMED_ROOM_BINDING,
+    ROOM_BINDING_MISMATCH,
+    RoomBindingRejected,
+    parse_room_binding,
+    room_bindings_equal,
+)
 from janus.search.ranker import BlendedRanker
 from janus.security.output_sanitizer import NullSanitizer, OutputSanitizer, ResultSanitizer
 
 Clock = Callable[[], datetime]
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _room_binding_error(capability_id: str) -> dict[str, Any]:
+    """Member-facing rejection. The header value is not included."""
+    return {
+        "status": "error",
+        "capability_id": capability_id,
+        "error": MALFORMED_ROOM_BINDING,
+    }
 
 
 def _tokenize(text: str) -> set[str]:
@@ -104,6 +120,23 @@ class Broker:
         # The store is process-local and shared across this identity's brokers.
         self._approval_mode = approval_mode
         self._approvals = approvals
+        # Pinned from the MCP request header by the session pool. Tool
+        # arguments and the REST body never write this field.
+        self._room_binding: str | None = None
+
+    def pin_room_binding(self, binding: str) -> None:
+        """Record the session's room-binding header. A different value fails closed.
+
+        Only the MCP session pool may call this. The value is checked against
+        the opaque format again so a bug cannot store an arbitrary string.
+        """
+        checked = parse_room_binding(binding)
+        current = self._room_binding
+        if current is None:
+            self._room_binding = checked
+            return
+        if not room_bindings_equal(current, checked):
+            raise RoomBindingRejected(ROOM_BINDING_MISMATCH) from None
 
     # -- helpers ------------------------------------------------------------ #
     def _effective_flags(self, cap: Capability) -> tuple[bool, bool]:
@@ -555,7 +588,10 @@ class Broker:
                     reason=reason,
                     gate_reason=confirm_reason,
                     trifecta=trifecta_gated,
+                    room_binding=self._room_binding,
                 )
+            except RoomBindingRejected:
+                return _room_binding_error(cap.id)
             except ValueError:
                 return {
                     "status": "error",
@@ -567,18 +603,22 @@ class Broker:
                 cap, server, env, arg_keys, confirm_reason, trifecta_gated, new_id
             )
 
-        outcome = self._approvals.consume(
-            presented,
-            identity=self._identity,
-            profile=self._profile,
-            session_id=self._session_id,
-            capability_id=cap.id,
-            server_id=cap.server_id,
-            tool_name=cap.downstream_tool_name,
-            env=str(env),
-            arguments=arguments,
-            reason=reason,
-        )
+        try:
+            outcome = self._approvals.consume(
+                presented,
+                identity=self._identity,
+                profile=self._profile,
+                session_id=self._session_id,
+                capability_id=cap.id,
+                server_id=cap.server_id,
+                tool_name=cap.downstream_tool_name,
+                env=str(env),
+                arguments=arguments,
+                reason=reason,
+                room_binding=self._room_binding,
+            )
+        except RoomBindingRejected:
+            return _room_binding_error(cap.id)
         if not outcome.ok:
             failure = outcome.failure or ApprovalFailure.UNKNOWN
             if failure is ApprovalFailure.PENDING:

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastmcp import FastMCP
@@ -18,6 +19,13 @@ from janus.approval import ApprovalMode
 from janus.broker import Broker
 from janus.exposure import DynamicToolExposer
 from janus.registry.registry import EnvScope
+from janus.room_binding import (
+    MALFORMED_ROOM_BINDING,
+    ROOM_BINDING_MISMATCH,
+    RoomBindingRejected,
+    presented_room_binding,
+    room_bindings_equal,
+)
 from janus.server_mcp import _parse_env, _parse_risk
 from janus.server_rest import BrokerDeps, HostIdentity
 
@@ -53,6 +61,8 @@ class SessionState:
     broker: Broker
     exposer: DynamicToolExposer
     last_seen: float
+    # Hidden from repr so a logged session object does not include the claim.
+    room_binding: str | None = field(default=None, repr=False)
 
 
 class McpSessionPool:
@@ -74,6 +84,11 @@ class McpSessionPool:
         self._clock = clock
         self._states: dict[str, SessionState] = {}
         self._owners: dict[str, str] = {}
+        self._lock = threading.Lock()
+        # Process-local, like the approval store. Not pruned with session TTL:
+        # a copied header must not open a second session after the first expires.
+        self._session_bindings: dict[str, str] = {}
+        self._binding_owners: dict[str, str] = {}
 
     @staticmethod
     def identity_from_access_token(token: AccessToken | None) -> HostIdentity:
@@ -124,7 +139,48 @@ class McpSessionPool:
     def from_context(self, context: Context | None = None) -> SessionState:
         ctx = context or get_context()
         identity = self.identity_from_access_token(get_access_token())
-        return self.state_for(identity, ctx.session_id)
+        presented: str | None = None
+        if identity.approval_mode is ApprovalMode.ROOM_APPROVAL:
+            # Legacy identities never reach this read, so a header on those
+            # sessions cannot fail the call or stick to a grant.
+            presented = presented_room_binding()
+        state = self.state_for(identity, ctx.session_id)
+        if identity.approval_mode is ApprovalMode.ROOM_APPROVAL:
+            self._apply_room_binding(state, presented)
+        return state
+
+    def _apply_room_binding(self, state: SessionState, presented: str | None) -> None:
+        """Pin ``presented`` to this MCP session, or keep the pin already made.
+
+        A missing header does not clear a pin and does not fail the call.
+        A different header for this session, or a header already pinned to
+        another session, fails closed. The stored value is copied onto the
+        session broker so later grants and consumes use it without reading
+        tool arguments.
+        """
+        with self._lock:
+            pinned = self._session_bindings.get(state.session_id)
+            if presented is None:
+                self._restore_pin(state, pinned)
+                return
+            if pinned is None:
+                owner = self._binding_owners.get(presented)
+                if owner is not None and owner != state.session_id:
+                    raise RoomBindingRejected(ROOM_BINDING_MISMATCH) from None
+                self._session_bindings[state.session_id] = presented
+                self._binding_owners[presented] = state.session_id
+                self._restore_pin(state, presented)
+                return
+            if not room_bindings_equal(pinned, presented):
+                raise RoomBindingRejected(ROOM_BINDING_MISMATCH) from None
+            self._restore_pin(state, pinned)
+
+    @staticmethod
+    def _restore_pin(state: SessionState, pinned: str | None) -> None:
+        if pinned is None or state.room_binding is not None:
+            return
+        state.broker.pin_room_binding(pinned)
+        state.room_binding = pinned
 
     async def ensure_auto_exposed(self, state: SessionState) -> None:
         missing = [
@@ -160,6 +216,14 @@ class McpSessionPool:
                 self._deps.trifecta.clear_session(state.key)
 
 
+def _room_binding_tool_error(exc: RoomBindingRejected) -> ToolResult:
+    """Tool result for a rejected header. The value is not copied onto it."""
+    message = str(exc)
+    if message not in {MALFORMED_ROOM_BINDING, ROOM_BINDING_MISMATCH}:
+        message = MALFORMED_ROOM_BINDING
+    return ToolResult(structured_content={"status": "error", "error": message})
+
+
 class SessionExposureMiddleware(Middleware):
     def __init__(self, pool: McpSessionPool) -> None:
         self._pool = pool
@@ -168,7 +232,13 @@ class SessionExposureMiddleware(Middleware):
         self, context: MiddlewareContext[Any], call_next: Callable[..., Any]
     ) -> Sequence[Tool]:
         tools = list(await call_next(context))
-        state = self._pool.from_context(context.fastmcp_context)
+        try:
+            state = self._pool.from_context(context.fastmcp_context)
+        except RoomBindingRejected:
+            # A rejected header must not pin, and must not become an error
+            # string that could be built from the header value. The base tool
+            # list is unchanged; tool calls still fail closed.
+            return tools
         await self._pool.ensure_auto_exposed(state)
         tools.extend(self._pool.exposed_tools(state))
         return tools
@@ -176,7 +246,10 @@ class SessionExposureMiddleware(Middleware):
     async def on_call_tool(
         self, context: MiddlewareContext[Any], call_next: Callable[..., Any]
     ) -> ToolResult:
-        state = self._pool.from_context(context.fastmcp_context)
+        try:
+            state = self._pool.from_context(context.fastmcp_context)
+        except RoomBindingRejected as exc:
+            return _room_binding_tool_error(exc)
         tool = self._pool.find_exposed(state, context.message.name)
         if tool is not None:
             return await tool.run(context.message.arguments or {})

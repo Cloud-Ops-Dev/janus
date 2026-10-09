@@ -191,7 +191,9 @@ runtime via the named environment variables the credential broker resolves.
 - **Room identities do not self-confirm.** A `JANUS_TOKENS` entry ending in
   `:room_approval` cannot authorize a confirm-tier or lethal-trifecta call with
   `confirm=true`. The call runs once only after a separate operator bearer
-  approves that exact request. The approval routes are not MCP tools. See
+  approves that exact request. An `X-Retinue-Room-Binding` MCP header, when
+  present, is pinned to that session and returned only on the operator
+  approval view. The approval routes are not MCP tools. See
   `docs/operations.md`.
 - **Tool-poisoning resistance** — model-visible text comes from human-reviewed summaries, not raw
   downstream descriptions; a descriptor/schema change auto-quarantines the capability until it is

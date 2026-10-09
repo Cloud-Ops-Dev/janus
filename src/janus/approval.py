@@ -5,9 +5,9 @@ the model ``confirm`` bit. The broker records a pending grant and executes
 only after the operator API approves that exact call. State lives in this
 process only: a restart drops every grant, and expiry fails closed.
 
-Do not log grant records. The canonical arguments and the caller reason can
-carry secret values. Those belong in the operator HTTP response, never in
-audit lines or model-facing call results.
+Do not log grant records. The canonical arguments, the caller reason, and a
+room-binding header can carry secret values. Those belong in the operator
+HTTP response, never in audit lines, logs, or model-facing call results.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from janus.room_binding import RoomBindingRejected, parse_room_binding, room_bindings_equal
 
 APPROVAL_TTL_SECONDS = 15 * 60
 
@@ -95,6 +97,8 @@ class ApprovalBinding:
     env: str
     arguments_canonical: str
     reason: str
+    # None is the in-process path. A string is the pinned MCP header value.
+    room_binding: str | None = None
 
     def matches(self, other: ApprovalBinding) -> bool:
         same = (
@@ -110,18 +114,26 @@ class ApprovalBinding:
         # field does not skip them.
         args_ok = _const_eq(self.arguments_canonical, other.arguments_canonical)
         reason_ok = _const_eq(self.reason, other.reason)
-        return same and args_ok and reason_ok
+        origin_ok = room_bindings_equal(self.room_binding or "", other.room_binding or "") and (
+            (self.room_binding is None) == (other.room_binding is None)
+        )
+        return same and args_ok and reason_ok and origin_ok
 
 
 @dataclass(frozen=True, repr=False)
 class ApprovalView:
-    """Operator-facing snapshot. ``arguments`` are the exact call payload."""
+    """Operator-facing snapshot. ``arguments`` are the exact call payload.
+
+    ``room_binding`` is the pinned MCP header value, or None when the caller
+    presented no header. It is operator-only.
+    """
 
     approval_request_id: str
     status: str
     identity: str
     profile: str
     session_id: str
+    room_binding: str | None
     capability_id: str
     server_id: str
     tool_name: str
@@ -140,6 +152,7 @@ class ApprovalView:
             "identity": self.identity,
             "profile": self.profile,
             "session_id": self.session_id,
+            "room_binding": self.room_binding,
             "capability_id": self.capability_id,
             "server_id": self.server_id,
             "tool_name": self.tool_name,
@@ -213,6 +226,7 @@ class ApprovalStore:
         reason: str,
         gate_reason: str,
         trifecta: bool,
+        room_binding: str | None = None,
     ) -> str:
         binding = _binding(
             identity=identity,
@@ -224,6 +238,7 @@ class ApprovalStore:
             env=env,
             arguments=arguments,
             reason=reason,
+            room_binding=room_binding,
         )
         with self._lock:
             now_mono, now_wall = self._now()
@@ -286,6 +301,7 @@ class ApprovalStore:
         env: str,
         arguments: dict[str, Any],
         reason: str,
+        room_binding: str | None = None,
     ) -> ConsumeResult:
         """Mark a matching approved grant consumed. Call this before downstream."""
         try:
@@ -299,8 +315,9 @@ class ApprovalStore:
                 env=env,
                 arguments=arguments,
                 reason=reason,
+                room_binding=room_binding,
             )
-        except ValueError:
+        except (ValueError, RoomBindingRejected):
             return ConsumeResult(ok=False, failure=ApprovalFailure.MISMATCHED)
         with self._lock:
             record = self._find_locked(approval_id)
@@ -369,6 +386,7 @@ class ApprovalStore:
             identity=record.binding.identity,
             profile=record.binding.profile,
             session_id=record.binding.session_id,
+            room_binding=record.binding.room_binding,
             capability_id=record.binding.capability_id,
             server_id=record.binding.server_id,
             tool_name=record.binding.tool_name,
@@ -393,11 +411,13 @@ def _binding(
     env: str,
     arguments: dict[str, Any],
     reason: str,
+    room_binding: str | None,
 ) -> ApprovalBinding:
     if not isinstance(arguments, dict):
         raise ValueError("arguments are not canonical JSON")
     if not isinstance(reason, str):
         raise ValueError("arguments are not canonical JSON")
+    checked_binding = parse_room_binding(room_binding) if room_binding is not None else None
     return ApprovalBinding(
         identity=identity,
         profile=profile,
@@ -408,6 +428,7 @@ def _binding(
         env=env,
         arguments_canonical=canonical_json(arguments),
         reason=reason,
+        room_binding=checked_binding,
     )
 
 
